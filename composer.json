@@ -1,0 +1,42 @@
+{
+    "name": "easybdit/laravel-mikrotik",
+    "description": "A Laravel abstraction for MikroTik RouterOS devices: connection management, router resource and hardware-health retrieval over the RouterOS REST API.",
+    "type": "library",
+    "license": "MIT",
+    "keywords": ["laravel", "mikrotik", "routeros", "network", "monitoring"],
+    "require": {
+        "php": "^8.1|^8.2|^8.3|^8.4",
+        "illuminate/support": "^10.0|^11.0|^12.0|^13.0",
+        "illuminate/http": "^10.0|^11.0|^12.0|^13.0",
+        "illuminate/contracts": "^10.0|^11.0|^12.0|^13.0"
+    },
+    "require-dev": {
+        "orchestra/testbench": "^8.0|^9.0|^10.0",
+        "phpunit/phpunit": "^10.0|^11.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "Easybdit\\LaravelMikrotik\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Easybdit\\LaravelMikrotik\\Tests\\": "tests/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "Easybdit\\LaravelMikrotik\\MikrotikServiceProvider"
+            ],
+            "aliases": {
+                "Mikrotik": "Easybdit\\LaravelMikrotik\\Facades\\Mikrotik"
+            }
+        }
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true,
+    "config": {
+        "sort-packages": true
+    }
+}
