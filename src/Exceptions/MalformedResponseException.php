@@ -19,11 +19,4 @@ class MalformedResponseException extends MikrotikException
             "MikroTik router at [{$host}] returned a response for [{$path}] that could not be parsed as JSON."
         );
     }
-
-    public static function unexpectedShape(string $host, string $path, string $expected): self
-    {
-        return new self(
-            "MikroTik router at [{$host}] returned an unexpected response shape for [{$path}] (expected {$expected})."
-        );
-    }
 }

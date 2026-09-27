@@ -10,10 +10,27 @@ use Easybdit\LaravelMikrotik\Exceptions\InvalidConfigurationException;
 use Easybdit\LaravelMikrotik\Facades\Mikrotik;
 use Easybdit\LaravelMikrotik\Tests\TestCase;
 use Illuminate\Http\Client\ConnectionException as HttpConnectionException;
+use Illuminate\Http\Client\StrayRequestException;
 use Illuminate\Support\Facades\Http;
 
 class ConnectionTest extends TestCase
 {
+    public function test_an_unfaked_request_fails_fast_instead_of_hitting_the_network(): void
+    {
+        // Regression guard for Http::preventStrayRequests() (set in
+        // TestCase::setUp()): a fake URL pattern that doesn't match the
+        // actual request must never silently fall through to a real
+        // network call — it previously did, and every test in this suite
+        // passed for the wrong reason until the fake patterns were fixed.
+        Http::fake([
+            'router.test/rest/system/health' => Http::response([], 200),
+        ]);
+
+        $this->expectException(StrayRequestException::class);
+
+        Mikrotik::connection()->resource();
+    }
+
     public function test_it_resolves_the_default_named_connection(): void
     {
         Http::fake([

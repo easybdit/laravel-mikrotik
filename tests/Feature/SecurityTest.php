@@ -10,6 +10,7 @@ use Easybdit\LaravelMikrotik\Exceptions\MikrotikException;
 use Easybdit\LaravelMikrotik\Exceptions\RouterOsException;
 use Easybdit\LaravelMikrotik\Facades\Mikrotik;
 use Easybdit\LaravelMikrotik\Tests\TestCase;
+use GuzzleHttp\Exception\ConnectException as GuzzleConnectException;
 use Illuminate\Http\Client\ConnectionException as HttpConnectionException;
 use Illuminate\Support\Facades\Http;
 
@@ -45,6 +46,50 @@ class SecurityTest extends TestCase
             $this->fail('Expected connection exception was not thrown.');
         } catch (MikrotikConnectionException $e) {
             $this->assertStringNotContainsString(self::PASSWORD, $e->getMessage());
+        }
+    }
+
+    public function test_connection_exception_chain_never_retains_the_raw_request_carrying_exception(): void
+    {
+        // The Guzzle exception this rethrows carries the full outgoing
+        // PSR-7 request via getRequest() — including the Authorization:
+        // Basic header. Regression guard: that object (or Laravel's own
+        // wrapper around it) must never be reachable via getPrevious(),
+        // however deep, since an application error tracker that
+        // serializes full exception chains could otherwise surface it.
+        Http::fake([
+            'router.test/*' => function () {
+                throw new HttpConnectionException(
+                    'cURL error 7: Failed to connect to router.test port 443: Connection refused',
+                    0,
+                    new GuzzleConnectException(
+                        'cURL error 7: Failed to connect to router.test port 443: Connection refused',
+                        new \GuzzleHttp\Psr7\Request(
+                            'GET',
+                            'https://router.test/rest/system/resource',
+                            ['Authorization' => 'Basic ' . base64_encode('admin:' . self::PASSWORD)]
+                        )
+                    )
+                );
+            },
+        ]);
+
+        try {
+            Mikrotik::connection()->resource();
+            $this->fail('Expected connection exception was not thrown.');
+        } catch (MikrotikConnectionException $e) {
+            $previous = $e->getPrevious();
+
+            $this->assertNotInstanceOf(HttpConnectionException::class, $previous);
+            $this->assertNotInstanceOf(GuzzleConnectException::class, $previous);
+
+            // Walk whatever chain remains (if any) — none of it may expose
+            // the password, and none of it may carry a PSR-7 request.
+            while ($previous !== null) {
+                $this->assertStringNotContainsString(self::PASSWORD, $previous->getMessage());
+                $this->assertFalse(method_exists($previous, 'getRequest'));
+                $previous = $previous->getPrevious();
+            }
         }
     }
 

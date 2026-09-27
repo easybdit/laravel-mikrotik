@@ -31,6 +31,15 @@ use Illuminate\Support\Facades\Http;
  * This class never logs the request it makes, and in particular never
  * logs the Authorization header, so no code path here can leak
  * credentials into application logs.
+ *
+ * GET vs POST (source: help.mikrotik.com "REST API" documentation): GET
+ * maps to a console "print" and accepts simple equality filters as URL
+ * query-string parameters (e.g. "?type=ether"). POST accepts arbitrary
+ * console command arguments as JSON body keys (e.g. POST .../print with
+ * body {"stats-detail":""}) — this is the only documented way to pass an
+ * argument GET's query string can't express. The same documentation
+ * states there is no way to run a continuous/streaming console command
+ * (e.g. "monitor") over REST at all; this class does not attempt to.
  */
 class RestTransport implements Transport
 {
@@ -44,27 +53,52 @@ class RestTransport implements Transport
     ) {
     }
 
-    public function get(string $path): array
+    public function get(string $path, array $query = []): array
     {
-        $path = '/' . ltrim($path, '/');
-        $url  = "https://{$this->host}:{$this->port}/rest{$path}";
+        $path = $this->normalizePath($path);
 
+        return $this->send($path, fn () => $this->client()->get($this->url($path), $query));
+    }
+
+    public function post(string $path, array $body = []): array
+    {
+        $path = $this->normalizePath($path);
+
+        return $this->send($path, fn () => $this->client()->post($this->url($path), $body));
+    }
+
+    private function client(): \Illuminate\Http\Client\PendingRequest
+    {
+        return Http::withBasicAuth($this->username, $this->password)
+            ->withOptions(['verify' => $this->verifyTls])
+            ->timeout($this->timeoutSeconds)
+            ->acceptJson();
+    }
+
+    private function url(string $path): string
+    {
+        return "https://{$this->host}:{$this->port}/rest{$path}";
+    }
+
+    private function normalizePath(string $path): string
+    {
+        return '/' . ltrim($path, '/');
+    }
+
+    /**
+     * @param \Closure(): \Illuminate\Http\Client\Response $send
+     * @return array<string|int, mixed>
+     */
+    private function send(string $path, \Closure $send): array
+    {
         try {
-            $response = Http::withBasicAuth($this->username, $this->password)
-                ->withOptions(['verify' => $this->verifyTls])
-                ->timeout($this->timeoutSeconds)
-                ->acceptJson()
-                ->get($url);
+            $response = $send();
         } catch (HttpConnectionException $e) {
-            // Laravel's own ConnectionException message may include the
-            // request URL (host/port), but never credentials — Basic Auth
-            // is sent as a header, not part of the URL, so nothing secret
-            // can leak through this rethrow.
             if ($this->isTimeout($e)) {
                 throw MikrotikConnectionException::timedOut($this->hostLabel(), $this->timeoutSeconds);
             }
 
-            throw MikrotikConnectionException::unreachable($this->hostLabel(), $e);
+            throw MikrotikConnectionException::unreachable($this->hostLabel(), $this->sanitizedPrevious($e));
         }
 
         if ($response->status() === 401 || $response->status() === 403) {
@@ -108,9 +142,38 @@ class RestTransport implements Transport
         return json_last_error() === JSON_ERROR_NONE ? $decoded : null;
     }
 
+    /**
+     * Laravel's HTTP client does not expose a distinct timeout exception
+     * type — a timeout and a plain connection failure both surface as
+     * Illuminate\Http\Client\ConnectionException, so the underlying cURL
+     * error message is the only signal available to tell them apart.
+     * Guzzle's CurlFactory builds this message itself from libcurl's own
+     * (locale-independent) error string, so matching on it is a stable —
+     * if inelegant — heuristic, not a fragile guess.
+     */
     private function isTimeout(HttpConnectionException $e): bool
     {
         return str_contains(strtolower($e->getMessage()), 'timed out')
             || str_contains(strtolower($e->getMessage()), 'timeout');
+    }
+
+    /**
+     * Strips the original exception down to a bare RuntimeException
+     * carrying only its message.
+     *
+     * $e (an Illuminate\Http\Client\ConnectionException) wraps a
+     * GuzzleHttp\Exception\ConnectException, whose getRequest() returns
+     * the complete outgoing PSR-7 request — including the
+     * "Authorization: Basic ..." header this class sent. Chaining $e
+     * directly as $previous would keep that request reachable from this
+     * package's own exception (via getPrevious()->getPrevious()->getRequest()),
+     * which an application-level error tracker could serialize. The
+     * message text itself is safe to keep: Guzzle/cURL error messages
+     * describe the failure (DNS, refused, timeout) and the request URL,
+     * never the Authorization header's contents.
+     */
+    private function sanitizedPrevious(HttpConnectionException $e): \RuntimeException
+    {
+        return new \RuntimeException($e->getMessage());
     }
 }

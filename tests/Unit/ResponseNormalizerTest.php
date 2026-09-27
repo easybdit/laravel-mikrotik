@@ -58,4 +58,27 @@ class ResponseNormalizerTest extends TestCase
         $this->assertIsInt($reading->get('a')->value);
         $this->assertIsFloat($reading->get('b')->value);
     }
+
+    public function test_normalize_logs_accepts_a_single_object_not_wrapped_in_a_list(): void
+    {
+        $logs = $this->normalizer->normalizeLogs([
+            'time' => '12:00:00', 'topics' => 'info', 'message' => 'single record',
+        ]);
+
+        $this->assertSame(1, $logs->count());
+        $this->assertSame('single record', $logs->all()[0]->message);
+    }
+
+    public function test_normalize_interfaces_accepts_single_objects_not_wrapped_in_lists(): void
+    {
+        $interfaces = $this->normalizer->normalizeInterfaces(
+            ['name' => 'ether1', 'type' => 'ether'],
+            ['name' => 'ether1', 'rx-byte' => '10'],
+        );
+
+        $ether1 = $interfaces->get('ether1');
+
+        $this->assertSame('ether', $ether1->type);
+        $this->assertSame(10, $ether1->rxByte);
+    }
 }

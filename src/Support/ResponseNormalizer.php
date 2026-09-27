@@ -6,6 +6,10 @@ namespace Easybdit\LaravelMikrotik\Support;
 
 use Easybdit\LaravelMikrotik\DTO\HealthReading;
 use Easybdit\LaravelMikrotik\DTO\HealthSensor;
+use Easybdit\LaravelMikrotik\DTO\InterfaceCollection;
+use Easybdit\LaravelMikrotik\DTO\LogCollection;
+use Easybdit\LaravelMikrotik\DTO\LogEntry;
+use Easybdit\LaravelMikrotik\DTO\RouterInterface;
 use Easybdit\LaravelMikrotik\DTO\RouterResource;
 
 /**
@@ -24,9 +28,15 @@ use Easybdit\LaravelMikrotik\DTO\RouterResource;
 final class ResponseNormalizer
 {
     /**
-     * RouterOS's documented sensor status tokens (source: RouterOS CLI
-     * reference for system/health — "value" is either numeric or one of
-     * these enum tokens for presence/state-style sensors).
+     * Non-numeric "value" tokens a presence/state-style health sensor
+     * (e.g. "psu1-state") can report. Verification status differs per
+     * token: "fail" is independently confirmed (MikroTik forum posts on
+     * PSU state reporting; official docs do not enumerate the full set).
+     * "ok", "not-present", "idle", and "no-input" are plausible by
+     * RouterOS's general status-naming convention but not independently
+     * confirmed from public documentation — treated as known tokens here
+     * on a best-effort basis. Re-verify against a real device if this
+     * list needs to be authoritative.
      */
     private const HEALTH_STATUS_TOKENS = ['ok', 'fail', 'not-present', 'idle', 'no-input'];
 
@@ -182,6 +192,116 @@ final class ResponseNormalizer
         return [$rawValue, null];
     }
 
+    /**
+     * Builds an InterfaceCollection from two verified RouterOS REST calls:
+     * $identityRaw from `GET /rest/interface` ("/interface print" —
+     * name/type/running/disabled/mtu/mac-address/comment), and $statsRaw
+     * from `POST /rest/interface/print` with body {"stats-detail":""}
+     * (rx/tx byte/packet, tx-queue-drop, link-downs, last-link-up/down
+     * -time — confirmed directly from MikroTik's documented console
+     * output for "/interface print stats-detail").
+     *
+     * RouterOS console output shows these as two separate views rather
+     * than one combined table, so this package makes two REST calls and
+     * merges them here by interface name (unique per device). An
+     * interface present in one response but not the other is not
+     * dropped — the missing side's fields are simply left null.
+     */
+    public function normalizeInterfaces(array $identityRaw, array $statsRaw): InterfaceCollection
+    {
+        $identityRows = $this->rowsByName($this->asRowList($identityRaw));
+        $statsRows = $this->rowsByName($this->asRowList($statsRaw));
+
+        $interfaces = [];
+
+        foreach (array_unique(array_merge(array_keys($identityRows), array_keys($statsRows))) as $name) {
+            $identity = $identityRows[$name] ?? [];
+            $stats = $statsRows[$name] ?? [];
+            $merged = array_merge($identity, $stats);
+
+            $interfaces[$name] = new RouterInterface(
+                name: $this->stringOrNull($merged, 'name') ?? $name,
+                type: $this->stringOrNull($merged, 'type'),
+                running: $this->boolOrNull($merged, 'running'),
+                disabled: $this->boolOrNull($merged, 'disabled'),
+                mtu: $this->intOrNull($merged, 'mtu'),
+                macAddress: $this->stringOrNull($merged, 'mac-address'),
+                comment: $this->stringOrNull($merged, 'comment'),
+                rxByte: $this->intOrNull($merged, 'rx-byte'),
+                txByte: $this->intOrNull($merged, 'tx-byte'),
+                rxPacket: $this->intOrNull($merged, 'rx-packet'),
+                txPacket: $this->intOrNull($merged, 'tx-packet'),
+                txQueueDrop: $this->intOrNull($merged, 'tx-queue-drop'),
+                linkDowns: $this->intOrNull($merged, 'link-downs'),
+                lastLinkDownTime: $this->stringOrNull($merged, 'last-link-down-time'),
+                lastLinkUpTime: $this->stringOrNull($merged, 'last-link-up-time'),
+                raw: $merged,
+            );
+        }
+
+        return new InterfaceCollection($interfaces);
+    }
+
+    /**
+     * Builds a LogCollection from a raw `/rest/log` payload — a JSON
+     * array of records, per RouterOS REST's documented list-menu
+     * convention (confirmed for e.g. /rest/ip/address; not independently
+     * re-captured for /log specifically, but /log is structurally the
+     * same kind of multi-row "print" menu). $time and $topics are kept
+     * as raw strings — see LogEntry's docblock for why.
+     */
+    public function normalizeLogs(array $raw): LogCollection
+    {
+        $entries = [];
+
+        foreach ($this->asRowList($raw) as $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+
+            $entries[] = new LogEntry(
+                id: $this->stringOrNull($row, '.id'),
+                time: $this->stringOrNull($row, 'time'),
+                topics: $this->stringOrNull($row, 'topics'),
+                message: $this->stringOrNull($row, 'message'),
+                raw: $row,
+            );
+        }
+
+        return new LogCollection($entries);
+    }
+
+    /**
+     * @return list<array<string, mixed>>
+     */
+    private function asRowList(array $raw): array
+    {
+        if ($this->isList($raw)) {
+            return array_values(array_filter($raw, 'is_array'));
+        }
+
+        // A single record, not wrapped in a list.
+        return $raw === [] ? [] : [$raw];
+    }
+
+    /**
+     * @param list<array<string, mixed>> $rows
+     * @return array<string, array<string, mixed>>
+     */
+    private function rowsByName(array $rows): array
+    {
+        $byName = [];
+
+        foreach ($rows as $row) {
+            $name = $row['name'] ?? null;
+            if (is_string($name) && $name !== '') {
+                $byName[$name] = $row;
+            }
+        }
+
+        return $byName;
+    }
+
     private function firstRecord(array $raw): array
     {
         if ($this->isList($raw)) {
@@ -223,5 +343,28 @@ final class ResponseNormalizer
         $value = (string) $record[$key];
 
         return is_numeric($value) ? (int) $value : null;
+    }
+
+    /**
+     * RouterOS REST encodes booleans as the literal strings "true"/
+     * "false" (confirmed: help.mikrotik.com "REST API" — every value is
+     * a JSON string). A blind `(bool) $value` cast is wrong here since
+     * PHP casts the non-empty string "false" to `true`. Only the exact
+     * tokens "true"/"false" are recognised; anything else is left null
+     * rather than guessed at.
+     */
+    private function boolOrNull(array $record, string $key): ?bool
+    {
+        if (!isset($record[$key]) || !is_scalar($record[$key])) {
+            return null;
+        }
+
+        $value = strtolower((string) $record[$key]);
+
+        return match ($value) {
+            'true' => true,
+            'false' => false,
+            default => null,
+        };
     }
 }

@@ -21,6 +21,12 @@ interface Transport
     /**
      * Fetch a read-only console resource (maps to RouterOS's "print").
      *
+     * $query is sent as simple equality filters (RouterOS REST's
+     * documented GET query-string form, e.g. "?type=ether"), for
+     * endpoints that support it. Omit it for endpoints that don't need
+     * filtering — this is what every P1 caller already does, unchanged.
+     *
+     * @param array<string, scalar> $query
      * @return array<string|int, mixed> Decoded response body.
      *
      * @throws ConnectionException        Router unreachable / timed out.
@@ -28,5 +34,21 @@ interface Transport
      * @throws RouterOsException          RouterOS returned an error.
      * @throws MalformedResponseException Response could not be parsed.
      */
-    public function get(string $path): array;
+    public function get(string $path, array $query = []): array;
+
+    /**
+     * Run a console command against a path via RouterOS REST's POST
+     * mechanism (the only way to pass command arguments RouterOS's GET
+     * query-string filtering can't express, e.g. "/interface print
+     * stats-detail" — POST /interface/print with body {"stats-detail":""}).
+     *
+     * @param array<string, scalar> $body
+     * @return array<string|int, mixed> Decoded response body.
+     *
+     * @throws ConnectionException        Router unreachable / timed out.
+     * @throws AuthenticationException    Credentials rejected.
+     * @throws RouterOsException          RouterOS returned an error.
+     * @throws MalformedResponseException Response could not be parsed.
+     */
+    public function post(string $path, array $body = []): array;
 }

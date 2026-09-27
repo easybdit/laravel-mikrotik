@@ -112,4 +112,35 @@ class ResourceTest extends TestCase
 
         Mikrotik::connection()->resource();
     }
+
+    public function test_error_response_missing_message_key_still_throws_router_os_exception(): void
+    {
+        // Not every failure body is guaranteed to carry RouterOS's usual
+        // {"error":..,"message":..} shape (e.g. a proxy/gateway in front
+        // of the router returning its own plain error page). The fallback
+        // "Unrecognised error response" branch in RestTransport::get()
+        // covers this — it must still surface as a RouterOsException,
+        // never an uncaught error or a misleading exception type.
+        Http::fake([
+            self::RESOURCE_URL => Http::response('Service Unavailable', 503),
+        ]);
+
+        $this->expectException(RouterOsException::class);
+
+        Mikrotik::connection()->resource();
+    }
+
+    public function test_empty_resource_response_returns_all_null_fields_not_an_error(): void
+    {
+        Http::fake([
+            self::RESOURCE_URL => Http::response([], 200),
+        ]);
+
+        $resource = Mikrotik::connection()->resource();
+
+        $this->assertNull($resource->architectureName);
+        $this->assertNull($resource->version);
+        $this->assertNull($resource->cpuCount);
+        $this->assertSame([], $resource->raw);
+    }
 }

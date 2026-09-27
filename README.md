@@ -2,13 +2,15 @@
 
 A Laravel abstraction for MikroTik RouterOS devices.
 
-**This is P1 — an intentionally small first release.** It provides
-connection management and two read-only endpoints (router resource info
-and hardware health) over the RouterOS REST API. Everything else —
-interfaces, traffic, logs, DHCP/PPP/firewall/VPN, monitoring, alerting,
-a binary-API transport, and AI-powered diagnosis (`easybdit/laravel-mikrotik-ai`,
-a separate future package) — is **not implemented yet**. See
-[Known limitations](#known-limitations) below for the authoritative list.
+**This is P1 + P2 — an intentionally small, incrementally-grown release.**
+It provides connection management and read-only retrieval of router
+resource info, hardware health, interfaces (with cumulative traffic
+counters), and log entries, all over the RouterOS REST API. Everything
+else — DHCP/PPP/firewall/VPN, monitoring persistence, scheduled polling,
+alerting, a binary-API transport, and AI-powered diagnosis
+(`easybdit/laravel-mikrotik-ai`, a separate future package) — is **not
+implemented yet**. See [Known limitations](#known-limitations) below for
+the authoritative list.
 
 ## Requirements
 
@@ -101,6 +103,76 @@ foreach ($health as $sensor) {
 }
 ```
 
+### Interfaces and traffic counters
+
+```php
+$interfaces = $router->interfaces();
+
+$eth1 = $interfaces->get('ether1');
+echo $eth1->type;         // "ether"
+echo $eth1->running;      // true (bool)
+echo $eth1->rxByte;       // 205164277 (int, cumulative bytes received)
+echo $eth1->linkDowns;    // 2 (int)
+
+foreach ($interfaces as $interface) {
+    echo "{$interface->name}: {$interface->rxByte} rx / {$interface->txByte} tx\n";
+}
+```
+
+**Traffic counters are cumulative, not live.** `rxByte`/`txByte`/
+`rxPacket`/`txPacket` are the totals RouterOS has counted since the
+interface's counters were last reset — in practice, since the last
+reboot. This package does **not** offer a live/instantaneous throughput
+reading, because RouterOS's REST API has no supported way to run a
+continuous "monitor" command (MikroTik's own REST API documentation
+states there is no option to run a continuous command like `monitor`
+over REST). To measure throughput, poll `interfaces()` twice and divide
+the delta by the elapsed time:
+
+```php
+$before = $router->interfaces()->get('ether1')->rxByte;
+sleep(5);
+$after = $router->interfaces()->get('ether1')->rxByte;
+
+$bytesPerSecond = ($after - $before) / 5;
+```
+
+Be aware that a reboot resets these counters to zero — a delta taken
+across a reboot will read as negative or nonsensical, not as an error;
+this package does not detect or guard against that case.
+
+`interfaces()` makes two RouterOS REST calls internally and merges the
+results by interface name: `GET /rest/interface` for identity/state
+fields, and `POST /rest/interface/print` with body `{"stats-detail":""}`
+for counters — RouterOS's own console separates these into two distinct
+`print` views, so this package does the same and combines them.
+
+### Logs
+
+```php
+$logs = $router->logs();
+
+foreach ($logs as $entry) {
+    echo "{$entry->time} [{$entry->topics}] {$entry->message}\n";
+}
+
+// Simple equality filtering (sent as a REST query-string parameter):
+$criticalOnly = $router->logs(['topics' => 'critical']);
+```
+
+`$entry->time` and `$entry->topics` are preserved exactly as RouterOS
+returns them and are **not** parsed. MikroTik's own documentation
+confirms the console log timestamp omits the date entirely for today's
+entries and omits the year always — there is no single safe format to
+normalize into without risking silent misinterpretation. `topicsList()`
+offers a best-effort comma-split of `topics` for convenience, but is not
+authoritative.
+
+Filtering only supports simple equality (RouterOS REST's documented
+`?field=value` query-string form). RouterOS's console-only `~`
+(contains/regex) filter operator is not supported over REST filtering in
+this phase.
+
 ### Why `health()` doesn't return a fixed object
 
 MikroTik hardware exposes different sensors per board — confirmed
@@ -146,6 +218,12 @@ try {
 - No exception message this package throws ever includes the configured
   username or password — verified directly by the test suite (see
   `tests/Feature/SecurityTest.php`).
+- This package's exception chain never retains the underlying Guzzle
+  request object either. A connection failure's root cause is preserved
+  as a plain message (host + failure description), not as the original
+  exception object — which would otherwise carry the full outgoing
+  request, including the `Authorization: Basic ...` header, reachable via
+  `getPrevious()`.
 - The package never logs a request it makes, and in particular never
   logs the `Authorization` header.
 
@@ -157,13 +235,20 @@ vendor/bin/phpunit
 ```
 
 The test suite uses `Illuminate\Support\Facades\Http::fake()` throughout
-— no physical MikroTik router is required to run it.
+— no physical MikroTik router is required to run it. The base `TestCase`
+also calls `Http::preventStrayRequests()`, so any request that doesn't
+match a registered fake fails the test immediately instead of silently
+making a real network call.
 
 ## Known limitations
 
-P1 intentionally does **not** include:
+This package intentionally does **not** include:
 
-- Interfaces, traffic counters, or logs
+- Live/instantaneous traffic monitoring — only cumulative interface
+  counters (see [Interfaces and traffic counters](#interfaces-and-traffic-counters))
+- Log filtering beyond simple equality (`?field=value`) — no `~`
+  (contains/regex) filtering, no pagination beyond RouterOS's own log
+  buffer size
 - DHCP, PPP/PPPoE, firewall, or VPN modules
 - Monitoring persistence, scheduled polling, or alerting
 - A binary RouterOS API transport (port 8728/8729) — REST only
@@ -173,6 +258,16 @@ P1 intentionally does **not** include:
 - Multi-tenant / SaaS functionality
 - Database-backed router credentials — configuration is `.env`/config
   file based only
+
+### RouterOS permissions
+
+`interfaces()` and `logs()` were verified against MikroTik's public
+documentation only (no live device was available for this package's
+development) and are expected to work with the same RouterOS user
+"read" policy that `resource()`/`health()` already require. This was not
+independently re-confirmed for `/interface` or `/log` specifically —
+if your RouterOS user has a restricted policy set, verify read access to
+these menus against your own device.
 
 ## License
 
