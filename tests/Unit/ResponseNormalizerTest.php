@@ -69,16 +69,26 @@ class ResponseNormalizerTest extends TestCase
         $this->assertSame('single record', $logs->all()[0]->message);
     }
 
-    public function test_normalize_interfaces_accepts_single_objects_not_wrapped_in_lists(): void
+    public function test_normalize_interfaces_accepts_a_single_object_not_wrapped_in_a_list(): void
     {
         $interfaces = $this->normalizer->normalizeInterfaces(
-            ['name' => 'ether1', 'type' => 'ether'],
-            ['name' => 'ether1', 'rx-byte' => '10'],
+            ['name' => 'ether1', 'type' => 'ether', 'rx-byte' => '10'],
         );
 
         $ether1 = $interfaces->get('ether1');
 
         $this->assertSame('ether', $ether1->type);
         $this->assertSame(10, $ether1->rxByte);
+    }
+
+    public function test_normalize_interface_rate_accepts_the_documented_array_wrapped_shape(): void
+    {
+        $rate = $this->normalizer->normalizeInterfaceRate([
+            ['name' => 'ether1', 'rx-bits-per-second' => '159176', 'tx-bits-per-second' => '227456'],
+        ]);
+
+        $this->assertSame('ether1', $rate->name);
+        $this->assertSame(159176, $rate->rxBitsPerSecond);
+        $this->assertSame(227456, $rate->txBitsPerSecond);
     }
 }

@@ -2,15 +2,15 @@
 
 A Laravel abstraction for MikroTik RouterOS devices.
 
-**This is P1 + P2 — an intentionally small, incrementally-grown release.**
-It provides connection management and read-only retrieval of router
-resource info, hardware health, interfaces (with cumulative traffic
-counters), and log entries, all over the RouterOS REST API. Everything
-else — DHCP/PPP/firewall/VPN, monitoring persistence, scheduled polling,
-alerting, a binary-API transport, and AI-powered diagnosis
-(`easybdit/laravel-mikrotik-ai`, a separate future package) — is **not
-implemented yet**. See [Known limitations](#known-limitations) below for
-the authoritative list.
+**This is P1 + P2 + P3 — an intentionally small, incrementally-grown
+release.** It provides connection management and read-only retrieval of
+router resource info, hardware health, interfaces (with cumulative
+traffic counters and a one-shot rate reading), and log entries, all over
+the RouterOS REST API. Everything else — DHCP/PPP/firewall/VPN,
+monitoring persistence, scheduled polling, alerting, a binary-API
+transport, and AI-powered diagnosis (`easybdit/laravel-mikrotik-ai`, a
+separate future package) — is **not implemented yet**. See
+[Known limitations](#known-limitations) below for the authoritative list.
 
 ## Requirements
 
@@ -112,6 +112,7 @@ $eth1 = $interfaces->get('ether1');
 echo $eth1->type;         // "ether"
 echo $eth1->running;      // true (bool)
 echo $eth1->rxByte;       // 205164277 (int, cumulative bytes received)
+echo $eth1->rxError;      // 0 (int)
 echo $eth1->linkDowns;    // 2 (int)
 
 foreach ($interfaces as $interface) {
@@ -120,14 +121,12 @@ foreach ($interfaces as $interface) {
 ```
 
 **Traffic counters are cumulative, not live.** `rxByte`/`txByte`/
-`rxPacket`/`txPacket` are the totals RouterOS has counted since the
-interface's counters were last reset — in practice, since the last
-reboot. This package does **not** offer a live/instantaneous throughput
-reading, because RouterOS's REST API has no supported way to run a
-continuous "monitor" command (MikroTik's own REST API documentation
-states there is no option to run a continuous command like `monitor`
-over REST). To measure throughput, poll `interfaces()` twice and divide
-the delta by the elapsed time:
+`rxPacket`/`txPacket`/`rxError`/`txError`/`rxDrop`/`txDrop` are the
+totals RouterOS has counted since the interface's counters were last
+reset — in practice, since the last reboot. This package does **not**
+offer a live/instantaneous throughput reading here — see
+[One-shot interface rate](#one-shot-interface-rate) below for that, or
+poll `interfaces()` twice and divide the delta by the elapsed time:
 
 ```php
 $before = $router->interfaces()->get('ether1')->rxByte;
@@ -141,11 +140,37 @@ Be aware that a reboot resets these counters to zero — a delta taken
 across a reboot will read as negative or nonsensical, not as an error;
 this package does not detect or guard against that case.
 
-`interfaces()` makes two RouterOS REST calls internally and merges the
-results by interface name: `GET /rest/interface` for identity/state
-fields, and `POST /rest/interface/print` with body `{"stats-detail":""}`
-for counters — RouterOS's own console separates these into two distinct
-`print` views, so this package does the same and combines them.
+`interfaces()` makes a single RouterOS REST call: `GET /rest/interface`.
+An earlier version of this package additionally called `POST
+/interface/print` with `{"stats-detail":""}`, on the assumption that
+counters needed a separate "stats" view — that's how RouterOS's own
+console splits them (`/interface print` vs `/interface print
+stats-detail`). Real-device verification (RouterOS 7.10.2, RB3011UiAS)
+showed the REST endpoint returns the full field set, counters included,
+in one response, so the second call was removed.
+
+### One-shot interface rate
+
+```php
+$rate = $router->interfaceRate('ether1');
+
+echo $rate->rxBitsPerSecond;    // 159176 (int)
+echo $rate->txBitsPerSecond;    // 227456 (int)
+echo $rate->rxPacketsPerSecond; // 182 (int)
+```
+
+This is RouterOS's `/interface monitor-traffic ... once` — a single
+instantaneous rate reading RouterOS itself computes over a brief
+internal sampling window, **not** a live/streaming subscription.
+Verified directly against a real device: `POST
+/rest/interface/monitor-traffic` with body `{"interface": "ether1",
+"once": ""}`. An invalid interface name throws `RouterOsException` with
+RouterOS's own message (`"input does not match any value of
+interface"`).
+
+Do not confuse this with `interfaces()`'s cumulative counters: this
+method makes a fresh request every call and returns whatever RouterOS
+measured at that moment, with no history retained by this package.
 
 ### Logs
 
@@ -244,8 +269,12 @@ making a real network call.
 
 This package intentionally does **not** include:
 
-- Live/instantaneous traffic monitoring — only cumulative interface
-  counters (see [Interfaces and traffic counters](#interfaces-and-traffic-counters))
+- Continuous/streaming traffic monitoring — `interfaces()` gives
+  cumulative counters, and `interfaceRate()` gives a one-shot
+  instantaneous reading, but nothing subscribes to a live feed (RouterOS
+  REST has no supported way to do this at all — see
+  [Interfaces and traffic counters](#interfaces-and-traffic-counters) and
+  [One-shot interface rate](#one-shot-interface-rate))
 - Log filtering beyond simple equality (`?field=value`) — no `~`
   (contains/regex) filtering, no pagination beyond RouterOS's own log
   buffer size

@@ -7,6 +7,7 @@ namespace Easybdit\LaravelMikrotik\Support;
 use Easybdit\LaravelMikrotik\DTO\HealthReading;
 use Easybdit\LaravelMikrotik\DTO\HealthSensor;
 use Easybdit\LaravelMikrotik\DTO\InterfaceCollection;
+use Easybdit\LaravelMikrotik\DTO\InterfaceRate;
 use Easybdit\LaravelMikrotik\DTO\LogCollection;
 use Easybdit\LaravelMikrotik\DTO\LogEntry;
 use Easybdit\LaravelMikrotik\DTO\RouterInterface;
@@ -193,53 +194,81 @@ final class ResponseNormalizer
     }
 
     /**
-     * Builds an InterfaceCollection from two verified RouterOS REST calls:
-     * $identityRaw from `GET /rest/interface` ("/interface print" —
-     * name/type/running/disabled/mtu/mac-address/comment), and $statsRaw
-     * from `POST /rest/interface/print` with body {"stats-detail":""}
-     * (rx/tx byte/packet, tx-queue-drop, link-downs, last-link-up/down
-     * -time — confirmed directly from MikroTik's documented console
-     * output for "/interface print stats-detail").
-     *
-     * RouterOS console output shows these as two separate views rather
-     * than one combined table, so this package makes two REST calls and
-     * merges them here by interface name (unique per device). An
-     * interface present in one response but not the other is not
-     * dropped — the missing side's fields are simply left null.
+     * Builds an InterfaceCollection from one verified RouterOS REST call:
+     * `GET /rest/interface`. Real-device verification (RouterOS 7.10.2,
+     * RB3011UiAS) confirmed this single response already contains every
+     * field this DTO exposes — including counters — so no second
+     * "stats-detail" call is needed (see RouterInterface's docblock for
+     * why an earlier version of this package made two calls here).
      */
-    public function normalizeInterfaces(array $identityRaw, array $statsRaw): InterfaceCollection
+    public function normalizeInterfaces(array $raw): InterfaceCollection
     {
-        $identityRows = $this->rowsByName($this->asRowList($identityRaw));
-        $statsRows = $this->rowsByName($this->asRowList($statsRaw));
-
         $interfaces = [];
 
-        foreach (array_unique(array_merge(array_keys($identityRows), array_keys($statsRows))) as $name) {
-            $identity = $identityRows[$name] ?? [];
-            $stats = $statsRows[$name] ?? [];
-            $merged = array_merge($identity, $stats);
+        foreach ($this->asRowList($raw) as $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+
+            $name = $this->stringOrNull($row, 'name');
+            if ($name === null) {
+                continue;
+            }
 
             $interfaces[$name] = new RouterInterface(
-                name: $this->stringOrNull($merged, 'name') ?? $name,
-                type: $this->stringOrNull($merged, 'type'),
-                running: $this->boolOrNull($merged, 'running'),
-                disabled: $this->boolOrNull($merged, 'disabled'),
-                mtu: $this->intOrNull($merged, 'mtu'),
-                macAddress: $this->stringOrNull($merged, 'mac-address'),
-                comment: $this->stringOrNull($merged, 'comment'),
-                rxByte: $this->intOrNull($merged, 'rx-byte'),
-                txByte: $this->intOrNull($merged, 'tx-byte'),
-                rxPacket: $this->intOrNull($merged, 'rx-packet'),
-                txPacket: $this->intOrNull($merged, 'tx-packet'),
-                txQueueDrop: $this->intOrNull($merged, 'tx-queue-drop'),
-                linkDowns: $this->intOrNull($merged, 'link-downs'),
-                lastLinkDownTime: $this->stringOrNull($merged, 'last-link-down-time'),
-                lastLinkUpTime: $this->stringOrNull($merged, 'last-link-up-time'),
-                raw: $merged,
+                name: $name,
+                type: $this->stringOrNull($row, 'type'),
+                running: $this->boolOrNull($row, 'running'),
+                disabled: $this->boolOrNull($row, 'disabled'),
+                mtu: $this->intOrNull($row, 'mtu'),
+                macAddress: $this->stringOrNull($row, 'mac-address'),
+                comment: $this->stringOrNull($row, 'comment'),
+                rxByte: $this->intOrNull($row, 'rx-byte'),
+                txByte: $this->intOrNull($row, 'tx-byte'),
+                rxPacket: $this->intOrNull($row, 'rx-packet'),
+                txPacket: $this->intOrNull($row, 'tx-packet'),
+                rxError: $this->intOrNull($row, 'rx-error'),
+                txError: $this->intOrNull($row, 'tx-error'),
+                rxDrop: $this->intOrNull($row, 'rx-drop'),
+                txDrop: $this->intOrNull($row, 'tx-drop'),
+                txQueueDrop: $this->intOrNull($row, 'tx-queue-drop'),
+                linkDowns: $this->intOrNull($row, 'link-downs'),
+                lastLinkDownTime: $this->stringOrNull($row, 'last-link-down-time'),
+                lastLinkUpTime: $this->stringOrNull($row, 'last-link-up-time'),
+                raw: $row,
             );
         }
 
         return new InterfaceCollection($interfaces);
+    }
+
+    /**
+     * Builds an InterfaceRate from a raw `/interface/monitor-traffic`
+     * ("once") response — verified directly against a real device to be
+     * a JSON array containing a single object (see InterfaceRate's
+     * docblock for the exact request/response captured).
+     */
+    public function normalizeInterfaceRate(array $raw): InterfaceRate
+    {
+        $record = $this->firstRecord($raw);
+
+        return new InterfaceRate(
+            name: $this->stringOrNull($record, 'name'),
+            rxBitsPerSecond: $this->intOrNull($record, 'rx-bits-per-second'),
+            txBitsPerSecond: $this->intOrNull($record, 'tx-bits-per-second'),
+            rxPacketsPerSecond: $this->intOrNull($record, 'rx-packets-per-second'),
+            txPacketsPerSecond: $this->intOrNull($record, 'tx-packets-per-second'),
+            rxErrorsPerSecond: $this->intOrNull($record, 'rx-errors-per-second'),
+            txErrorsPerSecond: $this->intOrNull($record, 'tx-errors-per-second'),
+            rxDropsPerSecond: $this->intOrNull($record, 'rx-drops-per-second'),
+            txDropsPerSecond: $this->intOrNull($record, 'tx-drops-per-second'),
+            txQueueDropsPerSecond: $this->intOrNull($record, 'tx-queue-drops-per-second'),
+            fpRxBitsPerSecond: $this->intOrNull($record, 'fp-rx-bits-per-second'),
+            fpTxBitsPerSecond: $this->intOrNull($record, 'fp-tx-bits-per-second'),
+            fpRxPacketsPerSecond: $this->intOrNull($record, 'fp-rx-packets-per-second'),
+            fpTxPacketsPerSecond: $this->intOrNull($record, 'fp-tx-packets-per-second'),
+            raw: $record,
+        );
     }
 
     /**
@@ -282,24 +311,6 @@ final class ResponseNormalizer
 
         // A single record, not wrapped in a list.
         return $raw === [] ? [] : [$raw];
-    }
-
-    /**
-     * @param list<array<string, mixed>> $rows
-     * @return array<string, array<string, mixed>>
-     */
-    private function rowsByName(array $rows): array
-    {
-        $byName = [];
-
-        foreach ($rows as $row) {
-            $name = $row['name'] ?? null;
-            if (is_string($name) && $name !== '') {
-                $byName[$name] = $row;
-            }
-        }
-
-        return $byName;
     }
 
     private function firstRecord(array $raw): array

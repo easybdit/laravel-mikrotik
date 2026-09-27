@@ -7,6 +7,7 @@ namespace Easybdit\LaravelMikrotik\Connection;
 use Easybdit\LaravelMikrotik\Contracts\Transport;
 use Easybdit\LaravelMikrotik\DTO\HealthReading;
 use Easybdit\LaravelMikrotik\DTO\InterfaceCollection;
+use Easybdit\LaravelMikrotik\DTO\InterfaceRate;
 use Easybdit\LaravelMikrotik\DTO\LogCollection;
 use Easybdit\LaravelMikrotik\DTO\RouterResource;
 use Easybdit\LaravelMikrotik\Support\ResponseNormalizer;
@@ -53,17 +54,31 @@ final class RouterConnection
      * Router interfaces (RouterOS `/interface`), including cumulative
      * traffic counters (bytes/packets since the interface last reset —
      * typically the last reboot). This is NOT a live/instantaneous
-     * throughput reading: RouterOS's REST API has no supported way to
-     * run a continuous "monitor" command, so a live-rate API is
-     * deliberately not offered here. To compute throughput, poll this
-     * method twice and divide the counter delta by the elapsed interval.
+     * throughput reading — see interfaceRate() for a one-shot rate
+     * reading, or poll this method twice and divide the counter delta
+     * by the elapsed interval to compute your own throughput.
      */
     public function interfaces(): InterfaceCollection
     {
-        $identity = $this->transport->get('/interface');
-        $stats = $this->transport->post('/interface/print', ['stats-detail' => '']);
+        return $this->normalizer->normalizeInterfaces($this->transport->get('/interface'));
+    }
 
-        return $this->normalizer->normalizeInterfaces($identity, $stats);
+    /**
+     * A one-shot traffic-rate snapshot for a single interface (RouterOS
+     * `/interface monitor-traffic ... once`). Unlike interfaces()'s
+     * cumulative counters, these are instantaneous rates RouterOS itself
+     * computes over a brief internal sampling window at the moment of
+     * the call — still not a live/streaming reading (RouterOS's REST API
+     * has no supported way to keep a "monitor" command running; each
+     * call here is a fresh, independent request).
+     *
+     * @throws \Easybdit\LaravelMikrotik\Exceptions\RouterOsException If $interfaceName does not exist on the router.
+     */
+    public function interfaceRate(string $interfaceName): InterfaceRate
+    {
+        return $this->normalizer->normalizeInterfaceRate(
+            $this->transport->post('/interface/monitor-traffic', ['interface' => $interfaceName, 'once' => ''])
+        );
     }
 
     /**
