@@ -329,20 +329,24 @@ API root either. Every RouterOS-side failure (400/404/etc.) surfaces as
 the existing `RouterOsException`, exactly like every other method in
 this package.
 
-**Real-device verification: still pending.** This phase is verified
-with `Http::fake()` against MikroTik's own documented request/response
-examples (`help.mikrotik.com` "REST API") only. Two separate read-only
-connectivity attempts against the configured test device, on two
-different occasions, each stopped before reaching `/ip/address`: a
-connection timeout, then (later) the device reachable but its
-credentials rejected (HTTP 401) — recorded as observed, not assumed
-unchanged between attempts. No write has been attempted against a real
-device. One specific detail is unconfirmed pending a real device: whether a
-boolean field like `disabled` must be sent as the string `"true"`/
-`"false"` (this package's assumption, matching what GET already
-confirmed RouterOS returns) or the classic console `"yes"`/`"no"` —
-`enable()`/`disable()` should be verified against a real device before
-relying on them in production.
+**Real-device verification: complete.** Verified with `Http::fake()`
+against MikroTik's own documented request/response examples
+(`help.mikrotik.com` "REST API"), and additionally against a live
+RouterOS **7.10.2** device (board **RB3011UiAS**). Two earlier
+connectivity attempts had failed before authentication succeeded (a
+connection timeout, then an HTTP 401 under a read-only user); with a
+dedicated read-write test user, a full pass succeeded end to end
+against a temporary, non-routable test address
+(`203.0.113.99/32`, RFC 5737) on an idle, link-down interface with no
+address previously assigned: `list()`, `add()`, `find()`/`list()`
+verification, `update()`, `disable()`, `enable()`, and `remove()`, with
+`find()` confirming RouterOS's actual state after every write and a
+final `list()` confirming complete cleanup. **This confirmed the
+`disabled` field's write wire format is the string `"true"`/`"false"`**
+(matching GET's own convention), not the classic console `"yes"`/`"no"`
+— the package's original assumption was correct, so no code changed.
+No production address, firewall, DHCP, PPP, routing, or other
+interface configuration was touched.
 
 ### Retry (opt-in, P9)
 
@@ -857,12 +861,6 @@ This package intentionally does **not** include:
 - Any RouterOS configuration menu except `/ip/address` (P13) — `menu()`
   (P9) remains GET-only for everything else, and no other typed write
   resource exists yet (no DHCP/PPP/firewall/VLAN/queue/etc. write API)
-- Real-device confirmation of `enable()`/`disable()`'s wire format for
-  the `disabled` field (`"true"`/`"false"` assumed, matching GET's own
-  confirmed convention, but not independently verified for a write body
-  — two separate real-device connectivity attempts (a timeout, then a
-  credentials rejection) both stopped before any `/ip/address` request
-  could be made; see [IP address management](#ip-address-management-p13))
 - IP address routes/`/ip/route` and any other `/ip/*` menu — P13
   implements `ip()->addresses()` only
 - Retry of any kind for write operations — P12's `put()`/`patch()`/

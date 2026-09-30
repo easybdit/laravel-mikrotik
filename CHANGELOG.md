@@ -32,17 +32,26 @@ All notable changes to `easybdit/laravel-mikrotik` are documented here.
   `remove()`/`enable()`/`disable()` validate `$id` against the same
   allow-list `Connection\Menu` already uses (own copy — `Menu` itself is
   untouched).
-- **Real-device verification: still pending, not skipped.** Two
-  separate read-only connectivity attempts against the configured test
-  device (`laravel_13_rnd`), on two different occasions: the first
-  returned a connection timeout; a follow-up attempt reached the device
-  successfully but had its credentials rejected (HTTP 401) — two
-  different failure modes, both recorded as observed rather than
-  assumed. No write was attempted against the device either time (both
-  stopped at connectivity/auth, before any `/ip/address` request could
-  be made). Verified with `Http::fake()` against official documentation
-  only, per this phase's own stop-and-report rule for an
-  unreachable/unauthenticated device.
+- **Real-device verification: complete.** Two earlier connectivity
+  attempts against the configured test device (`laravel_13_rnd`) had
+  failed before authentication succeeded (a connection timeout, then an
+  HTTP 401 credential rejection under a read-only user). With a
+  dedicated read-write test user, a full read/write pass against a live
+  RouterOS 7.10.2 (RB3011UiAS) device succeeded end to end: `list()`
+  against existing `/ip/address` entries, `add()` a temporary,
+  non-routable test address (`203.0.113.99/32`, RFC 5737 documentation
+  range) on an idle, link-down interface (`ether7`) with no address
+  previously assigned, `find()`/`list()` confirming it, `update()` of
+  its `comment`, `disable()` then `enable()` with `find()` confirming
+  RouterOS's actual state matched after each call — **confirming the
+  `disabled` field's assumed write wire format (`"true"`/`"false"`) is
+  correct** — then `remove()`, with a follow-up `list()` confirming no
+  trace remained. No production address, firewall, DHCP, PPP, routing,
+  or other interface was touched; no credentials were logged. The test
+  device returned to its original address count (7) afterward. No
+  package behavior needed to change — the real device matched every
+  documented assumption this phase already made, so no code fix was
+  required.
 - No changes to any P1-P12 public API. 208 tests, 496 assertions (up
   from 180), composer validate clean, php -l clean.
 
