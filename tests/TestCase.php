@@ -40,4 +40,12 @@ abstract class TestCase extends OrchestraTestCase
             'timeout'    => 5,
         ]);
     }
+
+    // Only takes effect for tests using RefreshDatabase — orchestra/
+    // testbench only calls this hook then, so P1-P3 tests (which use no
+    // database at all) are unaffected.
+    protected function defineDatabaseMigrations(): void
+    {
+        $this->loadMigrationsFrom(__DIR__ . '/../database/migrations');
+    }
 }

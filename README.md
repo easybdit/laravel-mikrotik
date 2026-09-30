@@ -2,14 +2,15 @@
 
 A Laravel abstraction for MikroTik RouterOS devices.
 
-**This is P1 + P2 + P3 — an intentionally small, incrementally-grown
+**This is P1 + P2 + P3 + P4 — an intentionally small, incrementally-grown
 release.** It provides connection management and read-only retrieval of
 router resource info, hardware health, interfaces (with cumulative
-traffic counters and a one-shot rate reading), and log entries, all over
-the RouterOS REST API. Everything else — DHCP/PPP/firewall/VPN,
-monitoring persistence, scheduled polling, alerting, a binary-API
-transport, and AI-powered diagnosis (`easybdit/laravel-mikrotik-ai`, a
-separate future package) — is **not implemented yet**. See
+traffic counters and a one-shot rate reading), log entries, and
+opt-in database persistence of point-in-time monitoring snapshots, all
+over the RouterOS REST API. Everything else — DHCP/PPP/firewall/VPN,
+scheduled polling, rules/alerting, a binary-API transport, and
+AI-powered diagnosis (`easybdit/laravel-mikrotik-ai`, a separate future
+package) — is **not implemented yet**. See
 [Known limitations](#known-limitations) below for the authoritative list.
 
 ## Requirements
@@ -198,6 +199,59 @@ Filtering only supports simple equality (RouterOS REST's documented
 (contains/regex) filter operator is not supported over REST filtering in
 this phase.
 
+### Monitoring snapshots (opt-in persistence)
+
+P4 adds an opt-in way to record a point-in-time capture of a connection's
+`resource()`, `health()`, and `interfaces()` into your application's own
+database, for later inspection or trend analysis. This is entirely
+additive — nothing in P1-P3 requires it, and an application that never
+publishes/runs the migration below is completely unaffected.
+
+Publish and run the migration:
+
+```bash
+php artisan vendor:publish --tag=mikrotik-migrations
+php artisan migrate
+```
+
+Then record a snapshot:
+
+```php
+use Easybdit\LaravelMikrotik\Monitoring\SnapshotRecorder;
+
+$recorder = app(SnapshotRecorder::class);
+
+$snapshot = $recorder->record();          // default connection
+$snapshot = $recorder->record('branch-01'); // a specific named connection
+
+$snapshot->connection;   // "default"
+$snapshot->captured_at;  // Carbon instance
+$snapshot->resource;     // array — same shape as RouterResource::toArray()
+$snapshot->health;       // array keyed by sensor name — HealthReading::toArray()
+$snapshot->interfaces;   // array keyed by interface name — InterfaceCollection::toArray()
+```
+
+`record()` makes the same REST calls `resource()`/`health()`/
+`interfaces()` already make (one call each) and stores their already-
+normalized output as JSON columns — it does not re-interpret or
+re-normalize RouterOS's response. Query recorded snapshots with the
+`Easybdit\LaravelMikrotik\Models\MikrotikSnapshot` Eloquent model:
+
+```php
+use Easybdit\LaravelMikrotik\Models\MikrotikSnapshot;
+
+$recent = MikrotikSnapshot::query()
+    ->forConnection('branch-01')
+    ->latest('captured_at')
+    ->limit(50)
+    ->get();
+```
+
+This phase does **not** include a scheduler, artisan command, or any
+automatic/recurring snapshot capture — see
+[Known limitations](#known-limitations). Calling `record()` is entirely
+up to your application (e.g. from your own scheduled command).
+
 ### Why `health()` doesn't return a fixed object
 
 MikroTik hardware exposes different sensors per board — confirmed
@@ -239,7 +293,12 @@ try {
 
 - HTTPS only; TLS certificate verification is **on by default**.
 - Credentials live in your app's own config/`.env` — this package does
-  not add a database table or admin UI for them in P1.
+  not add a database table or admin UI for them.
+- P4's `mikrotik_snapshots` table stores only what `resource()`/
+  `health()`/`interfaces()` already return to your application code
+  (board info, sensor readings, interface state/counters) — never
+  connection credentials. It lives in your own application's database,
+  so your normal database access controls apply to it.
 - No exception message this package throws ever includes the configured
   username or password — verified directly by the test suite (see
   `tests/Feature/SecurityTest.php`).
@@ -279,7 +338,10 @@ This package intentionally does **not** include:
   (contains/regex) filtering, no pagination beyond RouterOS's own log
   buffer size
 - DHCP, PPP/PPPoE, firewall, or VPN modules
-- Monitoring persistence, scheduled polling, or alerting
+- Scheduled/recurring polling of any kind — `SnapshotRecorder::record()`
+  (P4) captures one snapshot per call; nothing in this package invokes it
+  on a schedule (no artisan command, no console kernel entry)
+- Rules, thresholds, or alerting on recorded snapshot data
 - A binary RouterOS API transport (port 8728/8729) — REST only
 - Any AI integration (`easybdit/laravel-mikrotik-ai` is a separate,
   not-yet-built package; this package has no dependency on
