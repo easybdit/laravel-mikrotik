@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Easybdit\LaravelMikrotik;
 
 use Easybdit\LaravelMikrotik\Connection\ConnectionManager;
+use Easybdit\LaravelMikrotik\Console\Commands\MonitorCommand;
 use Easybdit\LaravelMikrotik\Monitoring\RuleEvaluator;
 use Easybdit\LaravelMikrotik\Monitoring\SnapshotRecorder;
 use Illuminate\Support\ServiceProvider;
@@ -33,6 +34,8 @@ class MikrotikServiceProvider extends ServiceProvider
     public function boot(): void
     {
         if ($this->app->runningInConsole()) {
+            $this->commands([MonitorCommand::class]);
+
             $this->publishes([
                 __DIR__ . '/../config/mikrotik.php' => $this->app->configPath('mikrotik.php'),
             ], 'mikrotik-config');
