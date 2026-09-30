@@ -2,7 +2,7 @@
 
 A Laravel abstraction for MikroTik RouterOS devices.
 
-**This is P1 through P10 — an intentionally small, incrementally-grown
+**This is P1 through P12 — an intentionally small, incrementally-grown
 release.** It provides connection management and read-only retrieval of
 router resource info, hardware health, interfaces (with cumulative
 traffic counters and a one-shot rate reading), log entries, opt-in
@@ -13,13 +13,16 @@ grouping above that alert lifecycle, a Laravel-scheduler-friendly
 read-only history/trend analytics over already-recorded data (including
 incidents), generic read-only RouterOS REST menu access for any menu
 this package doesn't have a named method for, and opt-in HTTP retry —
-all over the RouterOS REST API. Everything else — DHCP/PPP/firewall/VPN,
-any write/configuration operation, a binary-API transport, router
-CRUD/management, cross-rule incident correlation, and AI-powered
-diagnosis (`easybdit/laravel-mikrotik-ai`, a separate future package) —
-is **not implemented yet**. See
-[Known limitations](#known-limitations) below for the authoritative
-list.
+all over the RouterOS REST API. P12 additionally adds an internal write
+transport (`PUT`/`PATCH`/`DELETE`) as a foundation for future typed
+write APIs — it is **not** exposed through `menu()` or any public method
+yet (see [Write transport foundation](#write-transport-foundation-p12-internal-only)).
+Everything else — DHCP/PPP/firewall/VPN, any actual write/configuration
+operation, a binary-API transport, router CRUD/management, cross-rule
+incident correlation, and AI-powered diagnosis
+(`easybdit/laravel-mikrotik-ai`, a separate future package) — is **not
+implemented yet**. See [Known limitations](#known-limitations) below for
+the authoritative list.
 
 ## Requirements
 
@@ -271,6 +274,24 @@ access is provided without requiring callers to use a menu-specific DTO
 — useful once you need a menu this package hasn't named yet, while the
 five typed methods above remain the richer, safer choice for what they
 already cover.*
+
+### Write transport foundation (P12, internal only)
+
+P12 adds `put()`/`patch()`/`delete()` to this package's internal
+`Transport` contract — RouterOS REST's documented `add`/`set`/`remove`
+verbs. **Nothing public calls these yet**: `menu()` remains exactly as
+described above (GET-only), and no typed write API exists before a
+future phase. This is transport-layer plumbing only, verified with
+`Http::fake()` (exact method/path/body, error mapping, credential and
+request-body sanitization) — not yet exercised against a real device,
+since nothing exposes it.
+
+Write requests **never** use the read-path retry configuration
+(`connections.*.retry`, see [Retry](#retry-opt-in-p9) below), regardless
+of how it's set — an ambiguous failure (timeout, dropped connection)
+after a write already reached RouterOS cannot be safely retried without
+risking a duplicate "add" or a reapplied "set"/"remove". Write retry is
+not implemented at all in this phase.
 
 ### Retry (opt-in, P9)
 
@@ -708,6 +729,16 @@ try {
   race between two `mikrotik:monitor` processes evaluating the same
   rule+connection at nearly the same time. See
   [Concurrency](#concurrency-p11) below.
+- P12: the new `put()`/`patch()`/`delete()` transport methods reuse the
+  exact same credential-handling and exception-sanitization code path as
+  `get()`/`post()` — no new place exists where a password or the
+  `Authorization` header could leak. Write exceptions reflect only
+  RouterOS's *response*, never the request body sent — tested explicitly
+  since a future phase's request bodies may carry sensitive router-config
+  values (e.g. a PPP secret's password). Writes never use the read-path
+  retry configuration (see
+  [Write transport foundation](#write-transport-foundation-p12-internal-only)
+  above).
 
 ## Testing
 
@@ -764,10 +795,13 @@ This package intentionally does **not** include:
   `Illuminate\Events` hook yet
 - Notification channels beyond mail/webhook (no Slack, SMS, etc.), and
   no queueing of notification delivery (P7 is synchronous by design)
-- Any way to change RouterOS's own configuration — every phase through
-  P10 is strictly read-only plus this package's own database records (no
-  router CRUD/management yet, and `menu()` (P9) is GET-only — no
-  `add()`/`set()`/`remove()`/`enable()`/`disable()`)
+- Any way to change RouterOS's own configuration — `menu()` (P9) is
+  GET-only, no public API calls the P12 write transport, and there is no
+  `add()`/`set()`/`remove()`/`enable()`/`disable()` on anything yet (see
+  [Write transport foundation](#write-transport-foundation-p12-internal-only))
+- Retry of any kind for write operations — P12's `put()`/`patch()`/
+  `delete()` never retry, and there is no separate "write retry" setting
+  to opt into
 - Filtering beyond simple equality on `menu()->get()` — no RouterOS
   `.query`/`~`/operator-based filtering or `POST`-based filtering, only
   the same `?field=value` form `logs()` already uses (see

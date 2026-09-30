@@ -51,4 +51,59 @@ interface Transport
      * @throws MalformedResponseException Response could not be parsed.
      */
     public function post(string $path, array $body = []): array;
+
+    /**
+     * Create a new record (maps to RouterOS's "add"). $path has no
+     * identifier in it; RouterOS assigns one and includes it in the
+     * response (source: help.mikrotik.com "REST API" — PUT = add).
+     *
+     * P12 foundation only — nothing in this package calls this publicly
+     * yet. Implementations must never apply the read-path retry
+     * configuration to this method (see RestTransport's docblock for
+     * why: an ambiguous failure after a write already reached RouterOS
+     * cannot be safely retried).
+     *
+     * @param array<string, scalar> $body
+     * @return array<string|int, mixed> Decoded response body.
+     *
+     * @throws ConnectionException        Router unreachable / timed out.
+     * @throws AuthenticationException    Credentials rejected.
+     * @throws RouterOsException          RouterOS returned an error.
+     * @throws MalformedResponseException Response could not be parsed.
+     */
+    public function put(string $path, array $body = []): array;
+
+    /**
+     * Update an existing record by identifier (maps to RouterOS's
+     * "set"). $path includes the target's ".id" or name (source:
+     * help.mikrotik.com "REST API" — PATCH = set, identifier in the URL).
+     *
+     * P12 foundation only — see put()'s docblock re: retry.
+     *
+     * @param array<string, scalar> $body
+     * @return array<string|int, mixed> Decoded response body.
+     *
+     * @throws ConnectionException        Router unreachable / timed out.
+     * @throws AuthenticationException    Credentials rejected.
+     * @throws RouterOsException          RouterOS returned an error.
+     * @throws MalformedResponseException Response could not be parsed.
+     */
+    public function patch(string $path, array $body = []): array;
+
+    /**
+     * Remove an existing record by identifier (maps to RouterOS's
+     * "remove"). $path includes the target's ".id" or name (source:
+     * help.mikrotik.com "REST API" — DELETE = remove, identifier in the
+     * URL, no request body).
+     *
+     * P12 foundation only — see put()'s docblock re: retry.
+     *
+     * @return array<string|int, mixed> Decoded response body.
+     *
+     * @throws ConnectionException        Router unreachable / timed out.
+     * @throws AuthenticationException    Credentials rejected.
+     * @throws RouterOsException          RouterOS returned an error.
+     * @throws MalformedResponseException Response could not be parsed.
+     */
+    public function delete(string $path): array;
 }

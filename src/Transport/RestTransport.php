@@ -50,9 +50,18 @@ use Illuminate\Support\Facades\Http;
  * response; never for a 401/403 (AuthenticationException) or any other
  * 4xx (a RouterOS-side rejection like a bad query, not a transient
  * fault) — retrying those would not change the outcome and would risk
- * hammering credentials that are simply wrong. Retrying is otherwise
- * always safe here: P9 added no write operations, and GET/this class's
- * one documented POST use (monitor-traffic "once") are both idempotent.
+ * hammering credentials that are simply wrong. This retry configuration
+ * applies to get()/post() only -- see put()/patch()/delete() below.
+ *
+ * Write methods (P12, foundation only -- nothing in this package calls
+ * these publicly yet): put()/patch()/delete() map to RouterOS REST's
+ * documented add/set/remove verbs (source: help.mikrotik.com "REST
+ * API"). They deliberately never use the retry configuration above,
+ * regardless of $retryTimes -- an ambiguous failure (timeout, dropped
+ * connection) after a write has already reached RouterOS cannot be
+ * safely retried without knowing whether it applied, and retrying a
+ * "create" risks a duplicate resource. Write retry is not implemented
+ * at all here; it would need to be a separate, explicit mechanism.
  */
 class RestTransport implements Transport
 {
@@ -82,12 +91,31 @@ class RestTransport implements Transport
         return $this->send($path, fn () => $this->client()->post($this->url($path), $body));
     }
 
+    public function put(string $path, array $body = []): array
+    {
+        $path = $this->normalizePath($path);
+
+        return $this->send($path, fn () => $this->writeClient()->put($this->url($path), $body));
+    }
+
+    public function patch(string $path, array $body = []): array
+    {
+        $path = $this->normalizePath($path);
+
+        return $this->send($path, fn () => $this->writeClient()->patch($this->url($path), $body));
+    }
+
+    public function delete(string $path): array
+    {
+        $path = $this->normalizePath($path);
+
+        return $this->send($path, fn () => $this->writeClient()->delete($this->url($path)));
+    }
+
+    /** No retry -- used by get()/post() only. */
     private function client(): \Illuminate\Http\Client\PendingRequest
     {
-        $client = Http::withBasicAuth($this->username, $this->password)
-            ->withOptions(['verify' => $this->verifyTls])
-            ->timeout($this->timeoutSeconds)
-            ->acceptJson();
+        $client = $this->baseClient();
 
         if ($this->retryTimes > 0) {
             // throw:false is deliberate -- retry() must still hand back a
@@ -111,6 +139,20 @@ class RestTransport implements Transport
         }
 
         return $client;
+    }
+
+    /** Never retried, unconditionally -- used by put()/patch()/delete() only. See this class's docblock. */
+    private function writeClient(): \Illuminate\Http\Client\PendingRequest
+    {
+        return $this->baseClient();
+    }
+
+    private function baseClient(): \Illuminate\Http\Client\PendingRequest
+    {
+        return Http::withBasicAuth($this->username, $this->password)
+            ->withOptions(['verify' => $this->verifyTls])
+            ->timeout($this->timeoutSeconds)
+            ->acceptJson();
     }
 
     private function url(string $path): string

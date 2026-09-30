@@ -2,6 +2,31 @@
 
 All notable changes to `easybdit/laravel-mikrotik` are documented here.
 
+## P12 — Write transport foundation (internal only)
+
+- Added `put()`, `patch()`, `delete()` to `Contracts\Transport` and
+  `Transport\RestTransport`, mapping to RouterOS REST's documented
+  `add`/`set`/`remove` verbs (verified with `Http::fake()` —
+  documentation-based; not yet exercised against a real device, since
+  nothing public calls these). **Nothing in the package exposes these
+  yet**: `menu()` remains GET-only exactly as in P9, and no typed write
+  API exists — this is transport-layer plumbing for a future phase to
+  build on.
+- Write requests never use the read-path retry configuration
+  (`connections.*.retry`, P9/P11), regardless of how it's set, and
+  default to no retry — an ambiguous failure after a write already
+  reached RouterOS cannot be safely retried without risking a duplicate
+  "add" or a reapplied "set"/"remove". Verified with a regression test
+  showing the *same* `RestTransport` instance, same retry config,
+  retries a `get()` but not a `put()`.
+- Reuses the existing `send()` error-handling path unchanged (same
+  exception types, same credential sanitization) — confirmed with tests
+  that a write exception never contains the configured password nor
+  echoes back request-body values (relevant once a future phase writes
+  sensitive router-config values, e.g. a PPP secret's password).
+- No changes to any P1-P11 public API. 180 tests, 444 assertions (up
+  from 166), composer validate clean, php -l clean.
+
 ## P11 — Production hardening
 
 - Added GitHub Actions CI (`.github/workflows/tests.yml`): a matrix job
