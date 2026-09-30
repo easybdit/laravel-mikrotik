@@ -210,4 +210,57 @@ class RetryTest extends TestCase
             'expected 3 attempts for default + 1 for branch-01'
         );
     }
+
+    public function test_an_excessively_large_configured_retry_count_is_clamped_to_a_safe_maximum(): void
+    {
+        // P11: a misconfigured MIKROTIK_RETRY_TIMES (e.g. a bad env var)
+        // must not be able to cause hundreds of thousands of attempts --
+        // ConnectionManager clamps this to a safe maximum (10) rather
+        // than passing an arbitrary value straight through to Guzzle.
+        $this->withRetry(times: 999999, sleep: 0);
+
+        $attempts = 0;
+        Http::fake([self::RESOURCE_URL => function () use (&$attempts) {
+            $attempts++;
+
+            return Http::response(['message' => 'Internal Server Error'], 500);
+        }]);
+
+        try {
+            Mikrotik::connection()->resource();
+        } catch (RouterOsException) {
+            // expected -- this test only cares about the attempt count.
+        }
+
+        $this->assertSame(10, $attempts);
+    }
+
+    public function test_an_excessively_large_configured_timeout_is_clamped_to_a_safe_maximum(): void
+    {
+        // P11: Guzzle's own documented "timeout" option treats 0 as "wait
+        // indefinitely" -- a misconfigured MIKROTIK_TIMEOUT (0, or an
+        // implausibly large value) must not be passed straight through.
+        config()->set('mikrotik.connections.default.timeout', 999999);
+
+        $transport = (new \ReflectionClass(Mikrotik::connection()))
+            ->getProperty('transport')->getValue(Mikrotik::connection());
+
+        $timeoutSeconds = (new \ReflectionClass($transport))
+            ->getProperty('timeoutSeconds')->getValue($transport);
+
+        $this->assertSame(120, $timeoutSeconds);
+    }
+
+    public function test_a_zero_configured_timeout_is_clamped_to_a_safe_minimum_not_left_as_wait_indefinitely(): void
+    {
+        config()->set('mikrotik.connections.default.timeout', 0);
+
+        $transport = (new \ReflectionClass(Mikrotik::connection()))
+            ->getProperty('transport')->getValue(Mikrotik::connection());
+
+        $timeoutSeconds = (new \ReflectionClass($transport))
+            ->getProperty('timeoutSeconds')->getValue($transport);
+
+        $this->assertSame(1, $timeoutSeconds);
+    }
 }

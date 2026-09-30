@@ -2,6 +2,57 @@
 
 All notable changes to `easybdit/laravel-mikrotik` are documented here.
 
+## P11 — Production hardening
+
+- Added GitHub Actions CI (`.github/workflows/tests.yml`): a matrix job
+  covering every PHP/Laravel combination this package supports, each
+  individually verified with `composer require --dry-run -W` before
+  being added (Laravel 10/PHP 8.1-8.4, Laravel 11/PHP 8.2-8.4, Laravel
+  12/PHP 8.2-8.4, Laravel 13/PHP 8.3-8.4 — 12 combinations; PHP 8.1 with
+  Laravel 11+ is not listed because Composer cannot resolve it, not
+  because it was untested), a separate job running the suite against a
+  real MySQL 8 service container, and a `composer validate`/`php -l` job.
+- **Concurrency**: creating an active alert (`RuleEvaluator`) and opening
+  an incident (`IncidentManager`) are now protected by a real database
+  unique index (`mikrotik_alerts.active_rule_id` /
+  `mikrotik_incidents.open_rule_id`, each paired with `connection`,
+  nullable while inactive so history is never restricted) instead of
+  only an application-level check-then-create. Two `mikrotik:monitor`
+  processes evaluating the same rule+connection at nearly the same time
+  can no longer both create a duplicate active alert or open incident —
+  the loser's `INSERT` fails with a genuine database integrity error,
+  caught and treated as "already created by the other process."
+- **Reliability**: `mikrotik:monitor`'s per-connection catch was
+  broadened from `MikrotikException` to `Throwable` — a genuinely
+  unexpected failure while recording/evaluating/reconciling for one
+  connection (not just a MikroTik-specific one) no longer aborts
+  processing of the other configured connections.
+- **Security**: `timeout` and `retry.times`/`retry.sleep` are now
+  clamped to safe bounds (`timeout`: 1–120s; `retry.times`: 0–10;
+  `retry.sleep`: 0–30000ms) rather than passed through raw. Guzzle's own
+  documented `timeout` option treats `0` as "wait indefinitely"
+  (confirmed directly from `GuzzleHttp\RequestOptions`) — a
+  misconfigured `MIKROTIK_TIMEOUT=0` could previously hang a request
+  forever; an implausibly large `MIKROTIK_RETRY_TIMES` could previously
+  retry hundreds of thousands of times.
+- **Performance**: `MonitoringAnalytics::alertHistory()`,
+  `openIncidents()`, and `incidentHistory()` now eager-load the `rule`
+  relation, closing an N+1 query pattern for the expected "list +
+  read `->rule->name`" usage of these methods. Migration review found
+  `mikrotik_alerts.snapshot_id`/`incident_id` and
+  `mikrotik_incidents.rule_id` had no covering index outside of MySQL's
+  automatic FK indexing (`->constrained()` does not create a portable
+  index on SQLite/PostgreSQL) — added explicit indexes for all three, on
+  the still-unreleased P5/P10 migrations. `IncidentManager`'s
+  "find the open incident to resolve" lookup now queries by
+  `open_rule_id` directly (an exact match against the same unique index
+  above) instead of a separate `rule_id`+`status` lookup.
+- No changes to any P1-P10 public API or observable single-process
+  behavior; `interfaces()`/`interfaceRate()`/`menu()` remain exactly one
+  RouterOS request each (verified by re-reading each, not just assumed).
+  166 tests, 426 assertions (up from 159), composer validate clean,
+  php -l clean on every changed file.
+
 ## P10 — Incident grouping over the alert lifecycle
 
 - Added `Models\MikrotikIncident` and `Monitoring\IncidentManager`:

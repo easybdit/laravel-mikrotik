@@ -7,6 +7,7 @@ namespace Easybdit\LaravelMikrotik\Monitoring;
 use Easybdit\LaravelMikrotik\Models\MikrotikAlert;
 use Easybdit\LaravelMikrotik\Models\MikrotikRule;
 use Easybdit\LaravelMikrotik\Models\MikrotikSnapshot;
+use Illuminate\Database\QueryException;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Carbon;
 
@@ -81,10 +82,15 @@ final class RuleEvaluator
             // be seen as "already active" for a second, unrelated
             // connection too, since MikrotikAlert (not MikrotikRule)
             // is what actually carries the connection per episode.
+            //
+            // Looked up by active_rule_id (not rule_id+status) -- an
+            // exact match against the same unique index
+            // (active_rule_id, connection) that guards against a
+            // duplicate active alert below, rather than a separate
+            // lookup needing its own index.
             $activeAlert = MikrotikAlert::query()
-                ->where('rule_id', $rule->id)
+                ->where('active_rule_id', $rule->id)
                 ->where('connection', $snapshot->connection)
-                ->active()
                 ->first();
 
             if ($isMatch) {
@@ -92,31 +98,57 @@ final class RuleEvaluator
                     continue; // already active -- deduplicated, not a new row
                 }
 
-                $alerts[] = MikrotikAlert::query()->create([
-                    'rule_id'      => $rule->id,
-                    'snapshot_id'  => $snapshot->id,
-                    'connection'   => $snapshot->connection,
-                    'metric'       => $rule->metric,
-                    'operator'     => $rule->operator,
-                    'threshold'    => $rule->threshold,
-                    'value'        => $value,
-                    'status'       => MikrotikAlert::STATUS_TRIGGERED,
-                    'message'      => $rule->name,
-                    'triggered_at' => Carbon::now(),
-                ]);
+                try {
+                    $alerts[] = MikrotikAlert::query()->create([
+                        'rule_id'        => $rule->id,
+                        'snapshot_id'    => $snapshot->id,
+                        'connection'     => $snapshot->connection,
+                        'metric'         => $rule->metric,
+                        'operator'       => $rule->operator,
+                        'threshold'      => $rule->threshold,
+                        'value'          => $value,
+                        'status'         => MikrotikAlert::STATUS_TRIGGERED,
+                        'active_rule_id' => $rule->id,
+                        'message'        => $rule->name,
+                        'triggered_at'   => Carbon::now(),
+                    ]);
+                } catch (QueryException $e) {
+                    if (!$this->isIntegrityConstraintViolation($e)) {
+                        throw $e;
+                    }
+
+                    // Another process's evaluate() already created the
+                    // active alert for this rule+connection an instant
+                    // earlier -- that row is authoritative; do not create
+                    // a duplicate, and do not report anything for this
+                    // rule from this call (the process that actually
+                    // inserted it already returned/handled it).
+                }
 
                 continue;
             }
 
             if ($activeAlert !== null) {
                 $activeAlert->update([
-                    'status'      => MikrotikAlert::STATUS_RESOLVED,
-                    'resolved_at' => Carbon::now(),
+                    'status'         => MikrotikAlert::STATUS_RESOLVED,
+                    'resolved_at'    => Carbon::now(),
+                    'active_rule_id' => null,
                 ]);
             }
         }
 
         return $alerts;
+    }
+
+    /**
+     * SQLSTATE 23000 ("integrity constraint violation") covers a unique
+     * index collision across MySQL, SQLite, and PostgreSQL alike --
+     * driver-specific error text is never relied on (verified directly
+     * against this package's own test suite, not assumed).
+     */
+    private function isIntegrityConstraintViolation(QueryException $e): bool
+    {
+        return $e->getCode() === '23000';
     }
 
     /** @return \Illuminate\Database\Eloquent\Collection<int, MikrotikRule> */

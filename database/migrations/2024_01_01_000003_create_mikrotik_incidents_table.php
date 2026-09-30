@@ -34,6 +34,15 @@ return new class extends Migration
             $table->timestamps();
 
             $table->index(['connection', 'status']);
+            // rule_id has no covering composite index here (unlike
+            // mikrotik_alerts, where ['rule_id','status'] already covers
+            // it) -- MonitoringAnalytics::incidentCountsByRule() groups by
+            // it directly, and IncidentManager looks up "the open
+            // incident for this rule+connection" by it on every
+            // resolution. ->constrained() alone only guarantees an index
+            // on MySQL/InnoDB, not SQLite/PostgreSQL -- see the same note
+            // on mikrotik_alerts' migration.
+            $table->index('rule_id');
             $table->unique(['open_rule_id', 'connection'], 'mikrotik_incidents_one_open_per_rule_connection');
         });
 

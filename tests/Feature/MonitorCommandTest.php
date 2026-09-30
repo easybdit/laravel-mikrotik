@@ -95,6 +95,27 @@ class MonitorCommandTest extends TestCase
         $this->assertSame('default', MikrotikSnapshot::query()->sole()->connection);
     }
 
+    public function test_monitor_continues_past_a_connection_that_fails_unexpectedly(): void
+    {
+        // P11: the per-connection catch was broadened from MikrotikException
+        // to Throwable -- a genuinely unexpected failure (not a MikroTik-
+        // specific one) for one connection must still not stop the others.
+        $this->addBranchConnection();
+        $this->fakeDefaultConnection();
+        Http::fake([
+            'branch.test/rest/system/resource' => function () {
+                throw new \RuntimeException('unexpected failure unrelated to MikroTik');
+            },
+        ]);
+
+        $this->artisan('mikrotik:monitor')
+            ->assertExitCode(Command::SUCCESS)
+            ->expectsOutputToContain('unexpected failure unrelated to MikroTik');
+
+        $this->assertDatabaseCount('mikrotik_snapshots', 1);
+        $this->assertSame('default', MikrotikSnapshot::query()->sole()->connection);
+    }
+
     public function test_monitor_fails_when_no_connections_are_configured(): void
     {
         config()->set('mikrotik.connections', []);

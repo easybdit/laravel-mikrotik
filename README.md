@@ -23,10 +23,23 @@ list.
 
 ## Requirements
 
-- PHP 8.1+
-- Laravel 10, 11, 12, or 13
 - A MikroTik router running **RouterOS v7.1beta4 or later**, with the
   `www-ssl` service enabled (Winbox/WebFig → IP → Services → `www-ssl`)
+- One of the PHP/Laravel combinations below — each is individually
+  verified installable with Composer (not just declared in
+  `composer.json`) and covered by CI (`.github/workflows/tests.yml`):
+
+  | Laravel | Testbench | PHP |
+  |---|---|---|
+  | 10 | ^8.0 | 8.1, 8.2, 8.3, 8.4 |
+  | 11 | ^9.0 | 8.2, 8.3, 8.4 |
+  | 12 | ^10.0 | 8.2, 8.3, 8.4 |
+  | 13 | ^11.0 | 8.3, 8.4 |
+
+  A combination not listed here (e.g. PHP 8.1 with Laravel 11+) is not
+  supported — Composer cannot resolve it, since Laravel itself raised its
+  own minimum PHP version partway through that range. The test suite
+  runs on both SQLite and MySQL in CI.
 
 This package is **HTTPS-only by design**, not just by default. RouterOS's
 plain-HTTP REST variant sends your router credentials as unencrypted HTTP
@@ -467,6 +480,25 @@ groundwork for a future phase that might group multiple alert episodes
 into one incident (not implemented — see
 [Known limitations](#known-limitations)).
 
+### Concurrency (P11)
+
+Two `mikrotik:monitor` processes (e.g. an overlapping scheduled run, or
+one run manually while another is still in flight) evaluating the same
+rule+connection at nearly the same time cannot both create an active
+alert or an open incident for it. Both `mikrotik_alerts` and
+`mikrotik_incidents` carry a real database **unique index**
+(`(active_rule_id, connection)` / `(open_rule_id, connection)`,
+nullable-while-inactive so history is never restricted) — the loser's
+`INSERT` fails with a genuine database integrity-constraint error, which
+`RuleEvaluator`/`IncidentManager` catch and treat as "the other process
+already created it," not an error, and not a duplicate row. This is a
+real database-level guarantee, not an application-level check with a
+race window, and it is **not** a claim of distributed locking — none is
+implemented. Prefer `->withoutOverlapping()` on Laravel's scheduler (see
+[Scheduled monitoring](#scheduled-monitoring-mikrotikmonitor-p6)) to
+avoid overlapping runs in the first place; this is the safety net for
+when that still happens (a manual run, a missed lock, etc.).
+
 ### Scheduled monitoring (`mikrotik:monitor`, P6)
 
 P6 adds an artisan command that ties P4 and P5 together: for one or more
@@ -493,7 +525,8 @@ Schedule::command('mikrotik:monitor')->everyFiveMinutes()->withoutOverlapping();
 `->withoutOverlapping()` is Laravel's own cache-based lock; this package
 deliberately does not build a second one. Each connection is handled
 independently inside the command: a failure capturing one (unreachable
-router, rejected credentials, a RouterOS-side error) is reported via a
+router, rejected credentials, a RouterOS-side error, or — P11 — any
+other unexpected failure, e.g. a database error) is reported via a
 console error line and does not stop the others, and each run is
 independent of the last (no state carried between invocations) — which
 is what makes running it repeatedly/on a schedule safe. The command
@@ -661,6 +694,20 @@ try {
   application-level check with a race window), so a duplicate-open
   attempt fails as a database integrity error, caught and handled by
   `IncidentManager` — never silently retried, never logged.
+- P11: `timeout` and `retry.times`/`retry.sleep` are clamped to safe
+  bounds (`timeout`: 1–120s; `retry.times`: 0–10; `retry.sleep`:
+  0–30000ms) rather than passed through raw. Guzzle's own documented
+  `timeout` option treats `0` as "wait indefinitely" — a misconfigured
+  `MIKROTIK_TIMEOUT=0` (or an implausibly large value from a bad env
+  var) can no longer hang a request forever or retry hundreds of
+  thousands of times. `verify_tls` still defaults to `true` and is never
+  disabled automatically by any code path.
+- P11: creating an active alert (`RuleEvaluator`) or opening an incident
+  (`IncidentManager`) is now protected by a real database unique index,
+  not just an application-level check-then-create — closing a genuine
+  race between two `mikrotik:monitor` processes evaluating the same
+  rule+connection at nearly the same time. See
+  [Concurrency](#concurrency-p11) below.
 
 ## Testing
 
@@ -674,6 +721,12 @@ The test suite uses `Illuminate\Support\Facades\Http::fake()` throughout
 also calls `Http::preventStrayRequests()`, so any request that doesn't
 match a registered fake fails the test immediately instead of silently
 making a real network call.
+
+CI (`.github/workflows/tests.yml`, P11) runs this suite against every
+combination in [Requirements](#requirements) above on SQLite, plus one
+additional run (PHP 8.4, Laravel 13) against a real MySQL 8 service
+container — this package's migrations are written to be portable across
+both (see `database/migrations/`), not SQLite-only.
 
 ## Known limitations
 
@@ -728,6 +781,10 @@ This package intentionally does **not** include:
 - Concurrent/batched RouterOS requests (e.g. the binary API's
   tag-correlated multiplexing over one socket) — REST is one request per
   response; nothing in this package sends multiple requests at once
+- Distributed locking (P11's concurrency protection is a real database
+  unique index, not a lock — see [Concurrency](#concurrency-p11); two
+  processes racing for the same rule/incident never both succeed, but
+  nothing coordinates processes beyond that)
 - A binary RouterOS API transport (port 8728/8729) — REST only
 - Any AI integration (`easybdit/laravel-mikrotik-ai` is a separate,
   not-yet-built package; this package has no dependency on

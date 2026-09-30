@@ -307,4 +307,50 @@ class MonitoringAnalyticsTest extends TestCase
         $this->assertCount(1, $analytics->incidentHistory('default'));
         $this->assertCount(1, $analytics->incidentHistory('branch-01'));
     }
+
+    public function test_incident_history_and_alert_history_do_not_n_plus_one_on_rule(): void
+    {
+        // P11: openIncidents()/incidentHistory()/alertHistory() eager-load
+        // "rule" -- without it, reading ->rule->name for each row in the
+        // loop below would issue one extra query per row instead of one
+        // extra query total.
+        $evaluator = new RuleEvaluator();
+        $incidentManager = new IncidentManager();
+
+        foreach (['a', 'b', 'c'] as $suffix) {
+            MikrotikRule::query()->create([
+                'connection' => 'default', 'name' => "Rule {$suffix}", 'metric' => "resource.cpu_load_{$suffix}",
+                'operator' => '>', 'threshold' => 90,
+            ]);
+        }
+        // Distinct metrics so all three rules match the same snapshot independently.
+        $snapshot = MikrotikSnapshot::query()->create([
+            'connection' => 'default', 'captured_at' => now(),
+            'resource' => ['cpu_load_a' => 95, 'cpu_load_b' => 95, 'cpu_load_c' => 95],
+            'health' => [], 'interfaces' => [],
+        ]);
+        $triggered = $evaluator->evaluate($snapshot);
+        $incidentManager->reconcile($triggered, collect());
+
+        $analytics = new MonitoringAnalytics();
+
+        $queries = 0;
+        \Illuminate\Support\Facades\DB::listen(function () use (&$queries) { $queries++; });
+
+        $incidents = $analytics->incidentHistory('default');
+        foreach ($incidents as $incident) {
+            $incident->rule?->name;
+        }
+
+        $alerts = $analytics->alertHistory('default');
+        foreach ($alerts as $alert) {
+            $alert->rule?->name;
+        }
+
+        $this->assertCount(3, $incidents);
+        $this->assertCount(3, $alerts);
+        // 1 query per collection fetch + 1 eager-load query per
+        // collection = 4 total, never 1+3+1+3=8 (the N+1 shape).
+        $this->assertLessThanOrEqual(4, $queries, "expected eager-loading to keep query count flat, got {$queries}");
+    }
 }

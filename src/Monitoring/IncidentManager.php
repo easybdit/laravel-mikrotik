@@ -108,10 +108,13 @@ final class IncidentManager
 
     private function resolveIncidentFor(MikrotikAlert $alert): ?MikrotikIncident
     {
+        // open_rule_id (not rule_id) -- an exact match against the same
+        // unique index (open_rule_id, connection) that already guards
+        // against a duplicate open incident, rather than a separate
+        // rule_id+status lookup needing its own index.
         $incident = MikrotikIncident::query()
-            ->where('rule_id', $alert->rule_id)
+            ->where('open_rule_id', $alert->rule_id)
             ->where('connection', $alert->connection)
-            ->open()
             ->first();
 
         if ($incident === null) {

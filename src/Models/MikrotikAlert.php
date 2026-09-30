@@ -25,10 +25,18 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
  * (not only reachable via $rule/$snapshot) so this row stays meaningful
  * even after its rule or snapshot is later deleted.
  *
+ * $active_rule_id (P11) mirrors $rule_id only while $status is
+ * 'triggered', cleared to null on resolution -- a unique index on
+ * ($active_rule_id, $connection) is what makes "at most one active alert
+ * per rule+connection" a real database-level guarantee, safe even under
+ * two `mikrotik:monitor` processes evaluating the same rule at nearly
+ * the same time (see RuleEvaluator).
+ *
  * @property int $id
  * @property int|null $rule_id
  * @property int|null $snapshot_id
  * @property int|null $incident_id
+ * @property int|null $active_rule_id
  * @property string $connection
  * @property string $metric
  * @property string $operator
@@ -50,6 +58,7 @@ class MikrotikAlert extends Model
         'rule_id',
         'snapshot_id',
         'incident_id',
+        'active_rule_id',
         'connection',
         'metric',
         'operator',

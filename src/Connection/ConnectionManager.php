@@ -74,11 +74,26 @@ final class ConnectionManager
             username: (string) $config['username'],
             password: (string) $config['password'],
             verifyTls: (bool) ($config['verify_tls'] ?? true),
-            timeoutSeconds: (int) ($config['timeout'] ?? 10),
-            retryTimes: (int) ($retry['times'] ?? 0),
-            retrySleepMilliseconds: (int) ($retry['sleep'] ?? 0),
+            // Clamped, not passed through raw (P11): Guzzle's own
+            // documented "timeout" semantics treat 0 as "wait
+            // indefinitely" (confirmed directly from
+            // GuzzleHttp\RequestOptions), so a misconfigured
+            // MIKROTIK_TIMEOUT=0 would otherwise hang forever against an
+            // unresponsive router. The upper bound is set just above
+            // RouterOS REST's own documented ~60s command timeout
+            // (help.mikrotik.com "REST API"), so the client can still
+            // receive RouterOS's own timeout error rather than cutting
+            // the connection first.
+            timeoutSeconds: self::clamp((int) ($config['timeout'] ?? 10), min: 1, max: 120),
+            retryTimes: self::clamp((int) ($retry['times'] ?? 0), min: 0, max: 10),
+            retrySleepMilliseconds: self::clamp((int) ($retry['sleep'] ?? 0), min: 0, max: 30000),
         );
 
         return new RouterConnection($name, $transport, new ResponseNormalizer());
+    }
+
+    private static function clamp(int $value, int $min, int $max): int
+    {
+        return max($min, min($max, $value));
     }
 }

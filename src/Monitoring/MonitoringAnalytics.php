@@ -132,7 +132,11 @@ final class MonitoringAnalytics
      */
     public function alertHistory(string $connection, ?Carbon $since = null, ?Carbon $until = null): Collection
     {
-        return $this->alertsQuery($connection, $since, $until)->orderBy('triggered_at')->get();
+        // Eager-loads rule (P11): showing "which rule fired" alongside a
+        // list of alerts is the expected use of this method, and without
+        // this a caller looping over the result to read ->rule->name
+        // would otherwise issue one extra query per row (N+1).
+        return $this->alertsQuery($connection, $since, $until)->with('rule')->orderBy('triggered_at')->get();
     }
 
     /**
@@ -163,7 +167,8 @@ final class MonitoringAnalytics
      */
     public function openIncidents(string $connection): Collection
     {
-        return MikrotikIncident::query()->forConnection($connection)->open()->orderBy('opened_at')->get();
+        // Eager-loads rule (P11) -- same N+1 reasoning as alertHistory().
+        return MikrotikIncident::query()->forConnection($connection)->open()->with('rule')->orderBy('opened_at')->get();
     }
 
     /**
@@ -173,7 +178,7 @@ final class MonitoringAnalytics
      */
     public function incidentHistory(string $connection, ?Carbon $since = null, ?Carbon $until = null): Collection
     {
-        return $this->incidentsQuery($connection, $since, $until)->orderBy('opened_at')->get();
+        return $this->incidentsQuery($connection, $since, $until)->with('rule')->orderBy('opened_at')->get();
     }
 
     /**

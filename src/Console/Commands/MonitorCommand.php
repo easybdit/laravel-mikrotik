@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace Easybdit\LaravelMikrotik\Console\Commands;
 
-use Easybdit\LaravelMikrotik\Exceptions\MikrotikException;
 use Easybdit\LaravelMikrotik\Models\MikrotikAlert;
 use Easybdit\LaravelMikrotik\Monitoring\AlertNotifier;
 use Easybdit\LaravelMikrotik\Monitoring\IncidentManager;
@@ -28,11 +27,14 @@ use Illuminate\Contracts\Config\Repository as ConfigRepository;
  * just be a duplicate, harder-to-configure scheduler architecture.
  *
  * Each connection is handled independently: a failure capturing one
- * (unreachable router, rejected credentials, a RouterOS-side error) is
- * reported via a component error line and does not stop the others from
- * being processed. This is what makes repeated/scheduled execution safe
- * -- one bad router does not take the whole run down, and each run is
- * independent of the last (no state is carried between invocations).
+ * (unreachable router, rejected credentials, a RouterOS-side error, or
+ * -- P11 -- any other unexpected failure, e.g. a database error while
+ * recording/evaluating) is reported via a component error line and does
+ * not stop the others from being processed. This is what makes
+ * repeated/scheduled execution safe -- one bad router (or one
+ * connection's unexpected failure of any kind) does not take the whole
+ * run down, and each run is independent of the last (no state is
+ * carried between invocations).
  *
  * After evaluating, this command also delivers P7's optional
  * notifications (AlertNotifier) for every alert that newly became
@@ -97,7 +99,13 @@ class MonitorCommand extends Command
                         . count($transitions['resolved']) . ' incident(s) resolved.'
                 );
                 $succeeded++;
-            } catch (MikrotikException $e) {
+            } catch (\Throwable $e) {
+                // P11: broadened from MikrotikException -- an unexpected
+                // failure while recording/evaluating/reconciling (e.g. a
+                // genuine database error, not the constraint-collision
+                // case RuleEvaluator/IncidentManager already handle
+                // internally) must not abort processing of the remaining
+                // connections in $names either.
                 $this->components->error("[{$name}] " . $e->getMessage());
             }
         }

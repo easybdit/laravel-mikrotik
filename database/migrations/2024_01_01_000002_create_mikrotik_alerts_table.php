@@ -36,6 +36,21 @@ return new class extends Migration
             // to avoid creating a duplicate 'triggered' row for a rule
             // that is already active — see RuleEvaluator::evaluate().
             $table->string('status')->default('triggered');
+            // Mirrors $rule_id only while $status is 'triggered', cleared
+            // to null on resolution -- the same pattern (and the same
+            // reason) as mikrotik_incidents' open_rule_id: the unique
+            // index below (P11) is what makes "at most one active alert
+            // per rule+connection" a real database-level guarantee, not
+            // just the application-level check-then-create RuleEvaluator
+            // already did. Under two concurrent `mikrotik:monitor`
+            // processes racing to evaluate the same rule at nearly the
+            // same time, both could see "no active alert yet" before
+            // either commits -- without this, both would insert a
+            // 'triggered' row. Any number of *resolved* alerts for the
+            // same rule+connection still coexist freely (MySQL, SQLite,
+            // and PostgreSQL all treat multiple NULLs as non-conflicting
+            // in a unique index).
+            $table->unsignedBigInteger('active_rule_id')->nullable();
             $table->string('message')->nullable();
             $table->timestamp('triggered_at');
             $table->timestamp('resolved_at')->nullable();
@@ -43,6 +58,16 @@ return new class extends Migration
 
             $table->index(['connection', 'triggered_at']);
             $table->index(['rule_id', 'status']);
+            $table->unique(['active_rule_id', 'connection'], 'mikrotik_alerts_one_active_per_rule_connection');
+            // ->constrained() relies on the database engine to index a
+            // foreign key column automatically -- true for MySQL/InnoDB,
+            // NOT true for SQLite or PostgreSQL. snapshot_id has no
+            // covering composite index (unlike rule_id, covered by the
+            // index above), and incident_id has no ->constrained() call
+            // at all (see its own comment), so both get an explicit
+            // index for parity across engines.
+            $table->index('snapshot_id');
+            $table->index('incident_id');
         });
     }
 

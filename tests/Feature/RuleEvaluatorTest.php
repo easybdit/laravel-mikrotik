@@ -364,4 +364,54 @@ class RuleEvaluatorTest extends TestCase
         $this->assertSame(1, MikrotikAlert::query()->forConnection('default')->count());
         $this->assertSame(0, MikrotikAlert::query()->forConnection('branch-01')->count());
     }
+
+    public function test_concurrent_active_alert_creation_is_rejected_at_the_database_level(): void
+    {
+        // P11: a raw duplicate insert for the same (active_rule_id,
+        // connection) pair must be rejected by the unique index itself --
+        // the real database-level guarantee two concurrent
+        // mikrotik:monitor processes rely on, not just RuleEvaluator
+        // choosing not to insert one.
+        $rule = MikrotikRule::query()->create([
+            'connection' => 'default', 'name' => 'High CPU', 'metric' => 'resource.cpu_load',
+            'operator' => '>', 'threshold' => 90,
+        ]);
+
+        MikrotikAlert::query()->create([
+            'rule_id' => $rule->id, 'connection' => 'default', 'metric' => 'resource.cpu_load',
+            'operator' => '>', 'threshold' => 90, 'value' => 95,
+            'status' => MikrotikAlert::STATUS_TRIGGERED, 'active_rule_id' => $rule->id, 'triggered_at' => now(),
+        ]);
+
+        $this->expectException(\Illuminate\Database\QueryException::class);
+
+        \Illuminate\Support\Facades\DB::table('mikrotik_alerts')->insert([
+            'rule_id' => $rule->id, 'connection' => 'default', 'metric' => 'resource.cpu_load',
+            'operator' => '>', 'threshold' => 90, 'value' => 97,
+            'status' => MikrotikAlert::STATUS_TRIGGERED, 'active_rule_id' => $rule->id, 'triggered_at' => now(),
+            'created_at' => now(), 'updated_at' => now(),
+        ]);
+    }
+
+    public function test_evaluate_gracefully_handles_an_already_active_alert_from_another_process(): void
+    {
+        $rule = MikrotikRule::query()->create([
+            'connection' => 'default', 'name' => 'High CPU', 'metric' => 'resource.cpu_load',
+            'operator' => '>', 'threshold' => 90,
+        ]);
+
+        // Simulate a second, concurrent process that already created the
+        // active alert for this exact rule+connection an instant earlier.
+        MikrotikAlert::query()->create([
+            'rule_id' => $rule->id, 'connection' => 'default', 'metric' => 'resource.cpu_load',
+            'operator' => '>', 'threshold' => 90, 'value' => 95,
+            'status' => MikrotikAlert::STATUS_TRIGGERED, 'active_rule_id' => $rule->id, 'triggered_at' => now(),
+        ]);
+
+        // evaluate() must not throw and must not create a duplicate.
+        $alerts = (new RuleEvaluator())->evaluate($this->makeSnapshot());
+
+        $this->assertCount(0, $alerts);
+        $this->assertDatabaseCount('mikrotik_alerts', 1);
+    }
 }
