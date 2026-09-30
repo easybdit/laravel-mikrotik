@@ -10,8 +10,14 @@ use Easybdit\LaravelMikrotik\DTO\InterfaceCollection;
 use Easybdit\LaravelMikrotik\DTO\InterfaceRate;
 use Easybdit\LaravelMikrotik\DTO\LogCollection;
 use Easybdit\LaravelMikrotik\DTO\RouterResource;
+use Easybdit\LaravelMikrotik\Resources\DhcpResource;
+use Easybdit\LaravelMikrotik\Resources\DnsResource;
+use Easybdit\LaravelMikrotik\Resources\FirewallResource;
 use Easybdit\LaravelMikrotik\Resources\InterfaceResource;
 use Easybdit\LaravelMikrotik\Resources\IpResource;
+use Easybdit\LaravelMikrotik\Resources\PppResource;
+use Easybdit\LaravelMikrotik\Resources\QueueResource;
+use Easybdit\LaravelMikrotik\Resources\SystemIdentityResource;
 use Easybdit\LaravelMikrotik\Support\ResponseNormalizer;
 
 /**
@@ -136,5 +142,67 @@ final class RouterConnection
     public function interface(): InterfaceResource
     {
         return new InterfaceResource($this->transport, $this->normalizer);
+    }
+
+    /**
+     * Typed, read+write access to RouterOS's `/ip/firewall/*` menus
+     * (P15) — currently `firewall()->filter()` only, mapping to
+     * `/ip/firewall/filter`; see Resources\FirewallResource.
+     */
+    public function firewall(): FirewallResource
+    {
+        return new FirewallResource($this->transport, $this->normalizer);
+    }
+
+    /**
+     * Typed, read+write access to RouterOS's `/ip/dhcp-server*` menus
+     * (P16): `dhcp()->servers()` (`/ip/dhcp-server`) and
+     * `dhcp()->leases()` (`/ip/dhcp-server/lease`); see
+     * Resources\DhcpResource.
+     */
+    public function dhcp(): DhcpResource
+    {
+        return new DhcpResource($this->transport, $this->normalizer);
+    }
+
+    /**
+     * Typed, read+write access to RouterOS's `/ppp/*` menus (P17) —
+     * currently `ppp()->secrets()` only, mapping to `/ppp/secret`; see
+     * Resources\PppResource and PppSecretResource's security docblock
+     * for how PPP passwords are handled.
+     */
+    public function ppp(): PppResource
+    {
+        return new PppResource($this->transport, $this->normalizer);
+    }
+
+    /**
+     * Typed, read+write access to RouterOS's `/queue/*` menus (P18) —
+     * currently `queue()->simple()` only, mapping to `/queue/simple`;
+     * see Resources\QueueResource.
+     */
+    public function queue(): QueueResource
+    {
+        return new QueueResource($this->transport, $this->normalizer);
+    }
+
+    /**
+     * Typed, read+write access to RouterOS's `/ip/dns` menu (P21) — a
+     * singleton settings object (get()/update() only, no list). See
+     * Resources\DnsResource's docblock.
+     */
+    public function dns(): DnsResource
+    {
+        return new DnsResource($this->transport, $this->normalizer);
+    }
+
+    /**
+     * Typed, read+write access to RouterOS's `/system/identity` menu
+     * (P21) — a singleton settings object (get()/update() only, no
+     * list). See Resources\SystemIdentityResource's docblock.
+     */
+    public function systemIdentity(): SystemIdentityResource
+    {
+        return new SystemIdentityResource($this->transport, $this->normalizer);
     }
 }

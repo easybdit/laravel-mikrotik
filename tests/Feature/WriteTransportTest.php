@@ -84,6 +84,58 @@ class WriteTransportTest extends TestCase
         });
     }
 
+    public function test_post_write_sends_the_correct_method_path_and_body(): void
+    {
+        // P21: RouterOS's own "set" console command for a singleton
+        // menu returns an empty body on success (confirmed against a
+        // real device) -- this exercises the transport-level method/
+        // path/body only; ResourceTest classes cover the
+        // empty-response-then-follow-up-get() behavior this enables.
+        Http::fake(['router.test/rest/system/identity/set' => Http::response([], 200)]);
+
+        $result = $this->transport()->postWrite('/system/identity/set', ['name' => 'MyRouter']);
+
+        $this->assertSame([], $result);
+
+        Http::assertSent(function ($request) {
+            return $request->method() === 'POST'
+                && $request->url() === 'https://router.test/rest/system/identity/set'
+                && $request['name'] === 'MyRouter';
+        });
+    }
+
+    public function test_post_write_never_retries_even_when_retry_is_configured(): void
+    {
+        $attempts = 0;
+        Http::fake(['router.test/rest/system/identity/set' => function () use (&$attempts) {
+            $attempts++;
+
+            return Http::response(['message' => 'Internal Server Error'], 500);
+        }]);
+
+        $transport = $this->transport(retryTimes: 3, retrySleepMs: 0);
+
+        try {
+            $transport->postWrite('/system/identity/set', ['name' => 'x']);
+        } catch (RouterOsException) {
+            // expected -- this test only cares about the attempt count.
+        }
+
+        $this->assertSame(1, $attempts, 'a write must never be retried, even with retry configured on the transport');
+    }
+
+    public function test_post_write_error_response_throws_router_os_exception(): void
+    {
+        Http::fake(['router.test/rest/system/identity/set' => Http::response(
+            ['error' => 400, 'message' => 'Bad Request', 'detail' => 'missing or invalid resource identifier'],
+            400
+        )]);
+
+        $this->expectException(RouterOsException::class);
+
+        $this->transport()->postWrite('/system/identity/set', ['name' => 'x']);
+    }
+
     public function test_put_error_response_throws_router_os_exception(): void
     {
         Http::fake(['router.test/rest/ip/address' => Http::response(

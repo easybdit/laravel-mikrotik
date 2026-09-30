@@ -2,6 +2,84 @@
 
 All notable changes to `easybdit/laravel-mikrotik` are documented here.
 
+## P15-P21 — Firewall filter, DHCP, PPP secrets, simple queue, IP pool, IP route, DNS + system identity
+
+Seven typed resources added in one implementation cycle, all following
+P13/P14's established `list()`/`find()`/`add()`/`update()`/`remove()`/
+`enable()`/`disable()` shape wherever RouterOS actually supports each
+operation — no operation is forced onto a resource that doesn't support
+it (see each module below). Every field set was confirmed directly
+against a real device (RouterOS 7.10.2, RB3011UiAS) before being typed,
+not guessed from general RouterOS knowledge.
+
+- **P15 — `firewall()->filter()`** (`/ip/firewall/filter`): full
+  list/find/add/update/remove/enable/disable. `add()` requires `chain`.
+  Real-device confirmed: RouterOS strips a `/32` suffix from a
+  single-host `src-address`/`dst-address` on write (see
+  `DTO\FirewallFilterRule`'s docblock).
+- **P16 — `dhcp()->servers()`** (`/ip/dhcp-server`) and
+  **`dhcp()->leases()`** (`/ip/dhcp-server/lease`): full CRUD +
+  enable/disable on both. `add()` requires `name` (server) / `address`
+  (lease).
+- **P17 — `ppp()->secrets()`** (`/ppp/secret`): full CRUD +
+  enable/disable. `add()` requires `name`. **Security**: RouterOS's own
+  REST API returns a secret's `password` in plain text on every
+  GET/PUT/PATCH response — confirmed directly against a real device.
+  `DTO\PppSecret` has no `$password` property, and
+  `ResponseNormalizer::normalizePppSecret()` removes the `password` key
+  from `$raw` before it is ever stored on the DTO — a deliberate,
+  documented exception to this package's usual "raw is the untouched
+  response" contract, specifically because this one field is a live
+  credential, not configuration/state. Sending a password *to* RouterOS
+  via `add()`/`update()` is unaffected (that is outbound data, not
+  something this package echoes back).
+- **P18 — `queue()->simple()`** (`/queue/simple`): full CRUD +
+  enable/disable. `add()` requires `name`.
+- **P19 — `ip()->pools()`** (`/ip/pool`): `list()`/`find()`/`add()`/
+  `update()`/`remove()` only — **no `enable()`/`disable()`**, confirmed
+  directly against a real device that RouterOS's `/ip/pool` has no
+  `disabled` property at all. `add()` requires `name`.
+- **P20 — `ip()->routes()`** (`/ip/route`): full CRUD +
+  enable/disable. `add()` requires `dst-address`. Flagged in its own
+  docblock as this package's highest-risk write resource (a route
+  change can affect reachability); real-device testing used only an
+  isolated route (documentation-range `dst-address`, gateway = an idle,
+  unassigned interface) and never touched the router's actual
+  default/production routes (independently re-verified present and
+  unchanged after the test).
+- **P21 — `dns()`** (`/ip/dns`) and **`systemIdentity()`**
+  (`/system/identity`): both singleton "settings" menus (no `.id`, no
+  list) — `get()`/`update()` only. **A real, load-bearing finding from
+  this phase's real-device testing**: a singleton menu's write does
+  *not* use `PATCH <path>` with no identifier (confirmed *wrong* —
+  RouterOS rejects it with `"missing or invalid resource identifier"`,
+  HTTP 400, no change applied) — the correct, confirmed form is `POST
+  <path>/set` (RouterOS's own `set` console command, run via REST's
+  documented POST-a-command mechanism), which itself returns an **empty
+  body** on success rather than the updated record. Both `update()`
+  methods therefore POST the write, then issue a follow-up `get()` and
+  return that. This required a new transport method,
+  `Transport::postWrite()`/`RestTransport::postWrite()` — a POST that,
+  like `put()`/`patch()`/`delete()`, never uses the read-path retry
+  configuration. `dns()->update()` was *not* independently write-tested
+  against the real device (changing DNS servers is a functionally
+  significant change, not a harmless one — only `dns()->get()` was
+  real-device verified); `systemIdentity()->update()` *was*
+  real-device-verified end to end (temporary rename, verified, restored
+  to the original value, verified).
+- 132 new tests (340 total, up from 208; 729 assertions, up from 543),
+  covering list/find/add/update/remove/enable-disable where applicable,
+  validation, RouterOS error mapping, credential/secret sanitization,
+  non-retry, and exact method/path/body per module. `composer validate`
+  and `php -l` clean.
+- No changes to any P1-P14 public API. No production RouterOS
+  configuration was touched during real-device testing — every write
+  test used a disabled-first and/or documentation-range/idle-interface
+  scoped test resource, cleaned up and count-verified after each
+  module; the one exception (`systemIdentity()`) modifies a
+  purely-cosmetic router hostname and was restored to its original
+  value, verified.
+
 ## P14 — Interface management
 
 - Added `RouterConnection::interface(): Resources\InterfaceResource` —

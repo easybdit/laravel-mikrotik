@@ -4,16 +4,25 @@ declare(strict_types=1);
 
 namespace Easybdit\LaravelMikrotik\Support;
 
+use Easybdit\LaravelMikrotik\DTO\DhcpLease;
+use Easybdit\LaravelMikrotik\DTO\DhcpServer;
+use Easybdit\LaravelMikrotik\DTO\DnsSettings;
+use Easybdit\LaravelMikrotik\DTO\FirewallFilterRule;
 use Easybdit\LaravelMikrotik\DTO\HealthReading;
 use Easybdit\LaravelMikrotik\DTO\HealthSensor;
 use Easybdit\LaravelMikrotik\DTO\InterfaceCollection;
 use Easybdit\LaravelMikrotik\DTO\InterfaceRate;
 use Easybdit\LaravelMikrotik\DTO\InterfaceRecord;
 use Easybdit\LaravelMikrotik\DTO\IpAddress;
+use Easybdit\LaravelMikrotik\DTO\IpPool;
+use Easybdit\LaravelMikrotik\DTO\IpRoute;
 use Easybdit\LaravelMikrotik\DTO\LogCollection;
 use Easybdit\LaravelMikrotik\DTO\LogEntry;
+use Easybdit\LaravelMikrotik\DTO\PppSecret;
 use Easybdit\LaravelMikrotik\DTO\RouterInterface;
 use Easybdit\LaravelMikrotik\DTO\RouterResource;
+use Easybdit\LaravelMikrotik\DTO\SimpleQueue;
+use Easybdit\LaravelMikrotik\DTO\SystemIdentity;
 
 /**
  * Converts raw, already-JSON-decoded RouterOS REST payloads into this
@@ -382,6 +391,271 @@ final class ResponseNormalizer
             running: $this->boolOrNull($record, 'running'),
             disabled: $this->boolOrNull($record, 'disabled'),
             comment: $this->stringOrNull($record, 'comment'),
+            raw: $record,
+        );
+    }
+
+    /** Builds a list of FirewallFilterRule (P15) from a raw `/ip/firewall/filter` "print" payload. @return list<FirewallFilterRule> */
+    public function normalizeFirewallFilterRules(array $raw): array
+    {
+        $items = [];
+        foreach ($this->asRowList($raw) as $row) {
+            if (is_array($row)) {
+                $items[] = $this->normalizeFirewallFilterRule($row);
+            }
+        }
+
+        return $items;
+    }
+
+    /** Builds one FirewallFilterRule (P15) from a raw `/ip/firewall/filter` row. */
+    public function normalizeFirewallFilterRule(array $raw): FirewallFilterRule
+    {
+        $record = $this->firstRecord($raw);
+
+        return new FirewallFilterRule(
+            id: $this->stringOrNull($record, '.id'),
+            chain: $this->stringOrNull($record, 'chain'),
+            action: $this->stringOrNull($record, 'action'),
+            protocol: $this->stringOrNull($record, 'protocol'),
+            srcAddress: $this->stringOrNull($record, 'src-address'),
+            dstAddress: $this->stringOrNull($record, 'dst-address'),
+            srcPort: $this->stringOrNull($record, 'src-port'),
+            dstPort: $this->stringOrNull($record, 'dst-port'),
+            inInterface: $this->stringOrNull($record, 'in-interface'),
+            outInterface: $this->stringOrNull($record, 'out-interface'),
+            disabled: $this->boolOrNull($record, 'disabled'),
+            comment: $this->stringOrNull($record, 'comment'),
+            raw: $record,
+        );
+    }
+
+    /** Builds a list of DhcpServer (P16) from a raw `/ip/dhcp-server` "print" payload. @return list<DhcpServer> */
+    public function normalizeDhcpServers(array $raw): array
+    {
+        $items = [];
+        foreach ($this->asRowList($raw) as $row) {
+            if (is_array($row)) {
+                $items[] = $this->normalizeDhcpServer($row);
+            }
+        }
+
+        return $items;
+    }
+
+    /** Builds one DhcpServer (P16) from a raw `/ip/dhcp-server` row. */
+    public function normalizeDhcpServer(array $raw): DhcpServer
+    {
+        $record = $this->firstRecord($raw);
+
+        return new DhcpServer(
+            id: $this->stringOrNull($record, '.id'),
+            name: $this->stringOrNull($record, 'name'),
+            interface: $this->stringOrNull($record, 'interface'),
+            addressPool: $this->stringOrNull($record, 'address-pool'),
+            leaseTime: $this->stringOrNull($record, 'lease-time'),
+            disabled: $this->boolOrNull($record, 'disabled'),
+            comment: $this->stringOrNull($record, 'comment'),
+            raw: $record,
+        );
+    }
+
+    /** Builds a list of DhcpLease (P16) from a raw `/ip/dhcp-server/lease` "print" payload. @return list<DhcpLease> */
+    public function normalizeDhcpLeases(array $raw): array
+    {
+        $items = [];
+        foreach ($this->asRowList($raw) as $row) {
+            if (is_array($row)) {
+                $items[] = $this->normalizeDhcpLease($row);
+            }
+        }
+
+        return $items;
+    }
+
+    /** Builds one DhcpLease (P16) from a raw `/ip/dhcp-server/lease` row. */
+    public function normalizeDhcpLease(array $raw): DhcpLease
+    {
+        $record = $this->firstRecord($raw);
+
+        return new DhcpLease(
+            id: $this->stringOrNull($record, '.id'),
+            address: $this->stringOrNull($record, 'address'),
+            macAddress: $this->stringOrNull($record, 'mac-address'),
+            server: $this->stringOrNull($record, 'server'),
+            hostName: $this->stringOrNull($record, 'host-name'),
+            status: $this->stringOrNull($record, 'status'),
+            dynamic: $this->boolOrNull($record, 'dynamic'),
+            disabled: $this->boolOrNull($record, 'disabled'),
+            comment: $this->stringOrNull($record, 'comment'),
+            raw: $record,
+        );
+    }
+
+    /**
+     * Builds a list of PppSecret (P17) from a raw `/ppp/secret` "print"
+     * payload. See PppSecret's docblock: `password` is stripped from
+     * every row before it reaches this object or the DTO.
+     *
+     * @return list<PppSecret>
+     */
+    public function normalizePppSecrets(array $raw): array
+    {
+        $items = [];
+        foreach ($this->asRowList($raw) as $row) {
+            if (is_array($row)) {
+                $items[] = $this->normalizePppSecret($row);
+            }
+        }
+
+        return $items;
+    }
+
+    /**
+     * Builds one PppSecret (P17) from a raw `/ppp/secret` row. `password`
+     * is removed from $raw here, before it is ever stored on the DTO —
+     * see PppSecret's docblock for why this is a deliberate exception to
+     * this package's usual "raw is untouched" convention.
+     */
+    public function normalizePppSecret(array $raw): PppSecret
+    {
+        $record = $this->firstRecord($raw);
+
+        foreach (PppSecret::REDACTED_FIELDS as $field) {
+            unset($record[$field]);
+        }
+
+        return new PppSecret(
+            id: $this->stringOrNull($record, '.id'),
+            name: $this->stringOrNull($record, 'name'),
+            service: $this->stringOrNull($record, 'service'),
+            callerId: $this->stringOrNull($record, 'caller-id'),
+            profile: $this->stringOrNull($record, 'profile'),
+            remoteAddress: $this->stringOrNull($record, 'remote-address'),
+            disabled: $this->boolOrNull($record, 'disabled'),
+            comment: $this->stringOrNull($record, 'comment'),
+            raw: $record,
+        );
+    }
+
+    /** Builds a list of SimpleQueue (P18) from a raw `/queue/simple` "print" payload. @return list<SimpleQueue> */
+    public function normalizeSimpleQueues(array $raw): array
+    {
+        $items = [];
+        foreach ($this->asRowList($raw) as $row) {
+            if (is_array($row)) {
+                $items[] = $this->normalizeSimpleQueue($row);
+            }
+        }
+
+        return $items;
+    }
+
+    /** Builds one SimpleQueue (P18) from a raw `/queue/simple` row. */
+    public function normalizeSimpleQueue(array $raw): SimpleQueue
+    {
+        $record = $this->firstRecord($raw);
+
+        return new SimpleQueue(
+            id: $this->stringOrNull($record, '.id'),
+            name: $this->stringOrNull($record, 'name'),
+            target: $this->stringOrNull($record, 'target'),
+            maxLimit: $this->stringOrNull($record, 'max-limit'),
+            parent: $this->stringOrNull($record, 'parent'),
+            priority: $this->stringOrNull($record, 'priority'),
+            disabled: $this->boolOrNull($record, 'disabled'),
+            comment: $this->stringOrNull($record, 'comment'),
+            raw: $record,
+        );
+    }
+
+    /** Builds a list of IpPool (P19) from a raw `/ip/pool` "print" payload. @return list<IpPool> */
+    public function normalizeIpPools(array $raw): array
+    {
+        $items = [];
+        foreach ($this->asRowList($raw) as $row) {
+            if (is_array($row)) {
+                $items[] = $this->normalizeIpPool($row);
+            }
+        }
+
+        return $items;
+    }
+
+    /** Builds one IpPool (P19) from a raw `/ip/pool` row. */
+    public function normalizeIpPool(array $raw): IpPool
+    {
+        $record = $this->firstRecord($raw);
+
+        return new IpPool(
+            id: $this->stringOrNull($record, '.id'),
+            name: $this->stringOrNull($record, 'name'),
+            ranges: $this->stringOrNull($record, 'ranges'),
+            raw: $record,
+        );
+    }
+
+    /** Builds a list of IpRoute (P20) from a raw `/ip/route` "print" payload. @return list<IpRoute> */
+    public function normalizeIpRoutes(array $raw): array
+    {
+        $items = [];
+        foreach ($this->asRowList($raw) as $row) {
+            if (is_array($row)) {
+                $items[] = $this->normalizeIpRoute($row);
+            }
+        }
+
+        return $items;
+    }
+
+    /** Builds one IpRoute (P20) from a raw `/ip/route` row. */
+    public function normalizeIpRoute(array $raw): IpRoute
+    {
+        $record = $this->firstRecord($raw);
+
+        return new IpRoute(
+            id: $this->stringOrNull($record, '.id'),
+            dstAddress: $this->stringOrNull($record, 'dst-address'),
+            gateway: $this->stringOrNull($record, 'gateway'),
+            distance: $this->intOrNull($record, 'distance'),
+            scope: $this->stringOrNull($record, 'scope'),
+            targetScope: $this->stringOrNull($record, 'target-scope'),
+            inactive: $this->boolOrNull($record, 'inactive'),
+            disabled: $this->boolOrNull($record, 'disabled'),
+            comment: $this->stringOrNull($record, 'comment'),
+            raw: $record,
+        );
+    }
+
+    /**
+     * Builds DnsSettings (P21) from a raw `/ip/dns` response — a single
+     * JSON object (not a list), confirmed directly against a real
+     * device.
+     */
+    public function normalizeDnsSettings(array $raw): DnsSettings
+    {
+        $record = $this->firstRecord($raw);
+
+        return new DnsSettings(
+            servers: $this->stringOrNull($record, 'servers'),
+            allowRemoteRequests: $this->boolOrNull($record, 'allow-remote-requests'),
+            cacheSize: $this->stringOrNull($record, 'cache-size'),
+            cacheMaxTtl: $this->stringOrNull($record, 'cache-max-ttl'),
+            raw: $record,
+        );
+    }
+
+    /**
+     * Builds SystemIdentity (P21) from a raw `/system/identity`
+     * response — a single JSON object with one field (`name`),
+     * confirmed directly against a real device.
+     */
+    public function normalizeSystemIdentity(array $raw): SystemIdentity
+    {
+        $record = $this->firstRecord($raw);
+
+        return new SystemIdentity(
+            name: $this->stringOrNull($record, 'name'),
             raw: $record,
         );
     }

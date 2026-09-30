@@ -7,7 +7,7 @@ change its configuration, plus optional database-backed monitoring
 (snapshots, threshold alerts, incidents, notifications) built on top of
 the same reads.
 
-**Current release: P1 through P14.** Everything documented below is
+**Current release: P1 through P21.** Everything documented below is
 implemented, tested, and — where marked — verified against a real
 RouterOS device. Nothing in this README describes a feature that does
 not exist yet; planned future work is listed separately in
@@ -37,6 +37,12 @@ Capabilities fall into three groups:
 - `menu()` — generic **read-only** access to any other RouterOS menu
 - `ip()->addresses()->list()`/`find()` — typed reads of `/ip/address`
 - `interface()->list()`/`find()` — typed reads of `/interface`
+- `firewall()->filter()->list()`/`find()` — typed reads of `/ip/firewall/filter`
+- `dhcp()->servers()->list()`/`find()`, `dhcp()->leases()->list()`/`find()` — typed reads of `/ip/dhcp-server`, `/ip/dhcp-server/lease`
+- `ppp()->secrets()->list()`/`find()` — typed reads of `/ppp/secret` (passwords never included — see [PPP/PPPoE secret management](#7e-ppppppoe-secret-management-p17))
+- `queue()->simple()->list()`/`find()` — typed reads of `/queue/simple`
+- `ip()->pools()->list()`/`find()`, `ip()->routes()->list()`/`find()` — typed reads of `/ip/pool`, `/ip/route`
+- `dns()->get()`, `systemIdentity()->get()` — typed reads of `/ip/dns`, `/system/identity`
 
 **Monitoring** — optional, database-backed, built entirely on the reads
 above (nothing here talks to RouterOS on its own beyond what `resource()`/
@@ -62,11 +68,19 @@ above (nothing here talks to RouterOS on its own beyond what `resource()`/
 - P14 added a second: `interface()` — `list()`/`find()`/`update()`/
   `enable()`/`disable()` for RouterOS's `/interface` menu (no `add()`/
   `remove()` — see [Interface management](#7b-interface-management-p14)).
+- P15-P21 added seven more: `firewall()->filter()`, `dhcp()->servers()`/
+  `dhcp()->leases()`, `ppp()->secrets()`, `queue()->simple()`,
+  `ip()->pools()`, `ip()->routes()`, and the singleton settings
+  resources `dns()`/`systemIdentity()` — each following the same shape,
+  with operations limited to what RouterOS actually supports (e.g. no
+  `enable()`/`disable()` on `ip()->pools()`, no `add()`/`remove()` on
+  `dns()`/`systemIdentity()`). See [section 7](#7-ip-address-management)
+  onward for each one.
 - **`menu()` is, and will always remain, read-only.** It never issues a
   write request under any circumstance. Write access only exists through
-  explicit, typed resource classes like the two above.
-- No other RouterOS configuration menu is implemented yet — no DHCP,
-  PPP/PPPoE, firewall, queues, routes, DNS, users, etc. See
+  explicit, typed resource classes like the ones above.
+- No other RouterOS configuration menu is implemented yet — no VPN,
+  wireless, bridge, VLAN, user/scheduler, etc. See
   [Feature matrix](#18-feature-matrix) for the authoritative list of what
   exists today, and [Roadmap](#19-roadmap) for what's planned.
 
@@ -95,12 +109,14 @@ above (nothing here talks to RouterOS on its own beyond what `resource()`/
   already requires for your Laravel version — this package adds none of
   its own.
 - **RouterOS user permissions:** a read-only RouterOS user (the `read`
-  policy) is enough for every *read* capability above. `ip()->addresses()`
-  and `interface()` (both *write* capabilities) additionally require the
-  `write` policy — confirmed directly against a real device: a `read`-only
-  user gets a `RouterOsException` with RouterOS's own `"not enough
-  permissions (9)"` detail on any write call. Use a dedicated, least-
-  privilege RouterOS user rather than `admin` where practical.
+  policy) is enough for every *read* capability above. Every *write*
+  capability (`ip()->addresses()`, `interface()`, `firewall()->filter()`,
+  `dhcp()->servers()`/`leases()`, `ppp()->secrets()`, `queue()->simple()`,
+  `ip()->pools()`/`routes()`, `systemIdentity()`) additionally requires
+  the `write` policy — confirmed directly against a real device: a
+  `read`-only user gets a `RouterOsException` with RouterOS's own `"not
+  enough permissions (9)"` detail on any write call. Use a dedicated,
+  least-privilege RouterOS user rather than `admin` where practical.
 - `verify_tls` (config/`.env`: `MIKROTIK_VERIFY_TLS`) controls whether
   this package verifies the router's TLS certificate. Leave it `true` in
   production. Only set it `false` for a router using a self-signed
@@ -415,6 +431,226 @@ $iface->enable('ether7');                    // PATCH {"disabled": "false"}
   (e.g. `"ether7"`) — confirmed against a real device.
 - **Confirmed against a real device** that `disabled` uses the same
   `"true"`/`"false"` string convention as `ip()->addresses()`.
+
+### 7c. Firewall filter management (P15)
+
+`$router->firewall()->filter()` maps to RouterOS's `/ip/firewall/filter`
+menu — full `list()`/`find()`/`add()`/`update()`/`remove()`/`enable()`/
+`disable()`:
+
+```php
+$filter = $router->firewall()->filter();
+
+$filter->list();                              // Collection<DTO\FirewallFilterRule>
+$filter->list(['chain' => 'forward']);        // simple equality filter
+
+$rule = $filter->add([
+    'chain'  => 'forward', // required
+    'action' => 'drop',
+    'src-address' => '203.0.113.99/32', // a safe example — see the testing guide
+    'disabled' => true,
+]);
+
+$filter->update($rule->id, ['comment' => 'blocks test traffic']);
+$filter->disable($rule->id);
+$filter->enable($rule->id);
+$filter->remove($rule->id);
+```
+
+**Confirmed against a real device**: RouterOS strips a `/32`
+(single-host) suffix from `src-address`/`dst-address` on write — adding
+`'203.0.113.99/32'` reads back as `"203.0.113.99"` on the next `find()`.
+This is RouterOS's own behavior, not something this package controls.
+
+**This changes firewall behavior on your router — treat it with real
+caution.** See [Real MikroTik Testing Guide](#12-real-mikrotik-testing-guide)
+before testing against a real device: this package's own tests only
+ever use a rule created **disabled**, scoped to a documentation-only
+address that can never match real traffic, and removed immediately
+after.
+
+### 7d. DHCP management (P16)
+
+`$router->dhcp()` is a namespace object for two menus:
+
+```php
+$servers = $router->dhcp()->servers(); // /ip/dhcp-server
+$leases  = $router->dhcp()->leases();  // /ip/dhcp-server/lease
+
+$servers->list();                        // Collection<DTO\DhcpServer>
+$server = $servers->add(['name' => 'dhcp2', 'interface' => 'bridge2', 'disabled' => true]);
+$servers->update($server->id, ['comment' => 'secondary']);
+$servers->enable($server->id);
+$servers->disable($server->id);
+$servers->remove($server->id);
+
+$leases->list();                         // Collection<DTO\DhcpLease>
+$lease = $leases->add(['address' => '192.168.88.50', 'mac-address' => 'AA:BB:CC:DD:EE:FF']);
+$leases->update($lease->id, ['comment' => 'reserved']);
+$leases->remove($lease->id);
+```
+
+Both support full `list()`/`find()`/`add()`/`update()`/`remove()`/
+`enable()`/`disable()`. `add()` requires `name` (server) / `address`
+(lease). Most leases on a running network are **dynamic**
+(RouterOS-managed) — this package does not special-case dynamic vs.
+static leases; RouterOS itself governs what a write against one does.
+
+**Never touch an active production DHCP server or an existing lease.**
+This package's own real-device testing only ever added a **disabled**
+test server (kept disabled for its entire test, on an idle interface)
+and a test lease bound to a fake MAC address no real device uses.
+
+### 7e. PPP/PPPoE secret management (P17)
+
+`$router->ppp()->secrets()` maps to RouterOS's `/ppp/secret` menu — full
+`list()`/`find()`/`add()`/`update()`/`remove()`/`enable()`/`disable()`:
+
+```php
+$secrets = $router->ppp()->secrets();
+
+$secrets->list();                        // Collection<DTO\PppSecret> -- no passwords
+$secret = $secrets->add([
+    'name'     => 'a-new-username', // required
+    'password' => $password,        // your own variable -- never hardcode one
+    'service'  => 'pppoe',
+    'disabled' => true,
+]);
+$secrets->update($secret->id, ['comment' => 'test account']);
+$secrets->remove($secret->id);
+```
+
+**Security — read this before using this module.** RouterOS's own REST
+API returns a secret's `password` in **plain text** on every
+GET/PUT/PATCH response — confirmed directly against a real device. This
+package does **not** carry that value for you:
+
+- `DTO\PppSecret` has **no `$password` property at all**.
+- `$secret->raw` has the `password` key **removed** before it ever
+  reaches the DTO — the one deliberate exception to this package's
+  usual "`->raw` is the untouched response" rule.
+- A password therefore cannot leak into a log line, an exception, or a
+  `json_encode()`/`toArray()` dump of anything this package hands you.
+- Sending a password *to* RouterOS (via `add()`/`update()`, to set or
+  change one) is unaffected — that is your own outbound data, not
+  something this package echoes back.
+- If your application genuinely needs to read a secret's password back,
+  do so outside this package (e.g. `$router->menu('ppp/secret')->get()`
+  — still real, still sensitive, but at least explicit about it).
+
+**Never modify or delete an existing PPP/PPPoE user.** Use a randomly
+generated, clearly temporary username for any testing, and never print,
+log, or commit a real password.
+
+### 7f. Simple Queue management (P18)
+
+`$router->queue()->simple()` maps to RouterOS's `/queue/simple` menu —
+full `list()`/`find()`/`add()`/`update()`/`remove()`/`enable()`/`disable()`:
+
+```php
+$queue = $router->queue()->simple();
+
+$queue->list();                          // Collection<DTO\SimpleQueue>
+$q = $queue->add([
+    'name'      => 'guest-limit', // required
+    'target'    => '192.168.88.0/24',
+    'max-limit' => '10M/10M',      // upload/download, RouterOS's own raw string form
+]);
+$queue->update($q->id, ['max-limit' => '5M/5M']);
+$queue->disable($q->id);
+$queue->remove($q->id);
+```
+
+`maxLimit`/`priority` are kept as RouterOS's own raw string (e.g.
+`"10M/10M"`) rather than parsed — this package does not invent a
+split/parse convention RouterOS's documentation doesn't specify.
+
+### 7g. IP Pool management (P19)
+
+`$router->ip()->pools()` maps to RouterOS's `/ip/pool` menu:
+
+```php
+$pools = $router->ip()->pools();
+
+$pools->list();                          // Collection<DTO\IpPool>
+$pool = $pools->add(['name' => 'dhcp-pool-2', 'ranges' => '192.168.89.10-192.168.89.100']);
+$pools->update($pool->id, ['ranges' => '192.168.89.10-192.168.89.150']);
+$pools->remove($pool->id);
+```
+
+`list()`/`find()`/`add()`/`update()`/`remove()` only — **no `enable()`/
+`disable()`**: confirmed directly against a real device that RouterOS's
+`/ip/pool` has no `disabled` property in its own model at all. This
+package does not force an operation onto a resource that doesn't
+support it.
+
+### 7h. IP Route management (P20)
+
+`$router->ip()->routes()` maps to RouterOS's `/ip/route` menu — full
+`list()`/`find()`/`add()`/`update()`/`remove()`/`enable()`/`disable()`:
+
+```php
+$routes = $router->ip()->routes();
+
+$routes->list();                          // Collection<DTO\IpRoute>
+$route = $routes->add(['dst-address' => '10.10.10.0/24', 'gateway' => '192.168.88.1']);
+$routes->update($route->id, ['comment' => 'branch link']);
+$routes->remove($route->id);
+```
+
+**This is this package's highest-risk write resource.** An incorrect
+write against `/ip/route` can affect your router's default gateway or
+reachability. This package validates only what it can safely guarantee
+(a safe identifier, `dst-address` presence) before sending a
+request — it does not, and cannot, know which route on your router is
+"the important one." **Never modify your default route, a WAN route, or
+any route you depend on.** This package's own real-device testing used
+only a fully isolated route (a documentation-only `dst-address`,
+pointed at an idle, unassigned interface as the gateway) and
+independently re-verified the router's actual default route was
+untouched afterward.
+
+### 7i. DNS + System identity (P21)
+
+Two **singleton settings** resources — architecturally different from
+every module above: there is no `.id`, no list, no `add()`/`remove()`,
+just `get()`/`update()`:
+
+```php
+$dns = $router->dns()->get();          // /ip/dns
+echo $dns->servers;                    // e.g. "8.8.8.8,1.1.1.1"
+$router->dns()->update(['servers' => '1.1.1.1,9.9.9.9']);
+
+$identity = $router->systemIdentity()->get(); // /system/identity
+echo $identity->name;                          // e.g. "MyRouter"
+$router->systemIdentity()->update('NewRouterName');
+```
+
+**A real finding from this package's own real-device testing, worth
+knowing if you build anything similar yourself**: the obvious guess for
+updating a singleton menu — `PATCH` to the menu's own path, with no
+identifier — is **wrong**. RouterOS rejects it with `"missing or
+invalid resource identifier"` (confirmed directly against a real
+device; no change was applied). The correct form is `POST` to the
+menu's `/set` path (RouterOS's own `set` console command, run through
+REST's documented "POST runs a console command" mechanism) — and that
+POST itself returns an **empty body** on success, not the updated
+record. Both `update()` methods here POST the write, then transparently
+re-`get()` and return the fresh state — you don't need to do this
+yourself.
+
+**Real-device verification differs between the two**: `systemIdentity()`
+was fully verified (temporary rename → verified → restored to the
+original value → verified) since a router's identity/hostname is purely
+cosmetic and cannot affect connectivity. `dns()->get()` was verified;
+`dns()->update()` was **not** write-tested against a real device —
+changing DNS servers is a functionally significant change to a live
+router, not a harmless one, so this package's own testing deliberately
+stopped at read-only for this specific menu. If you use
+`dns()->update()`, treat the underlying `POST .../set` mechanism as
+confirmed (via `systemIdentity()`) but the specific `/ip/dns` behavior
+as your own responsibility to verify first, on a router you can afford
+to misconfigure.
 
 ## 8. Monitoring
 
@@ -865,19 +1101,32 @@ or password — see [Security](#16-security).
   this package throws ever includes the configured username or password
   (verified by the test suite), and no request this package makes is
   ever logged.
-- Writes (`ip()->addresses()`, `interface()`) are **non-retrying** — an
-  ambiguous failure after a write already reached RouterOS is never
-  automatically retried, since that could risk a duplicate `add()` or a
-  reapplied `update()`.
-- Every menu path and item identifier (`menu()`, `ip()->addresses()`,
-  `interface()`) is validated against a strict allow-list before a
-  request is ever built — this is what stops a path-traversal or
-  protocol-like value from ever reaching the router.
+- **Every write in this package is non-retrying** — `put()`/`patch()`/
+  `delete()`/`postWrite()` (the internal transport methods every typed
+  write resource is built on) never use the read-path retry
+  configuration, regardless of how it's set. An ambiguous failure after
+  a write already reached RouterOS is never automatically retried, since
+  that could risk a duplicate `add()` or a reapplied `update()`.
+- Every menu path and item identifier (`menu()`, and every typed write
+  resource: `ip()->addresses()`, `interface()`, `firewall()->filter()`,
+  `dhcp()->servers()`/`leases()`, `ppp()->secrets()`, `queue()->simple()`,
+  `ip()->pools()`/`routes()`) is validated against a strict allow-list
+  before a request is ever built — this is what stops a path-traversal
+  or protocol-like value from ever reaching the router.
+- **PPP secret passwords are handled specially** — see
+  [PPP/PPPoE secret management](#7e-ppppppoe-secret-management-p17).
+  RouterOS itself returns a secret's password in plain text; this package strips
+  it before it ever reaches your code, everywhere except a request body
+  you send yourself.
 - Always use HTTPS (there is no alternative in this package) and keep
   TLS certificate verification enabled in production.
 - Use a **least-privilege** RouterOS user: `read`-only unless you
-  specifically need `ip()->addresses()`/`interface()`, in which case add
+  specifically need a write capability (see
+  [Requirements](#2-requirements) for the full list), in which case add
   `write` — never hand this package `full`/`admin` access by default.
+- `ip()->routes()` carries real risk if misused against a production
+  router (it can affect reachability) — see
+  [IP Route management](#7h-ip-route-management-p20) before using it.
 - Monitoring's database tables (`mikrotik_snapshots`, `mikrotik_rules`,
   `mikrotik_alerts`, `mikrotik_incidents`) store only what `resource()`/
   `health()`/`interfaces()` already return plus rule/alert bookkeeping —
@@ -894,7 +1143,9 @@ Mikrotik facade  ->  ConnectionManager  ->  RouterConnection
         |                                        v
         |                          Typed RouterOS APIs (resource(),
         |                          health(), interfaces(), logs(),
-        |                          menu(), ip(), interface(), ...)
+        |                          menu(), ip(), interface(),
+        |                          firewall(), dhcp(), ppp(), queue(),
+        |                          dns(), systemIdentity())
         |                                        |
         |                                        v
         |                          ResponseNormalizer (raw JSON -> DTOs)
@@ -925,12 +1176,17 @@ The pieces you'll actually interact with:
 - **`Menu`** is the class behind `menu()` — generic, read-only, path-
   validated access to any RouterOS menu.
 - **`RestTransport`** is the internal HTTP layer (Laravel's own `Http`
-  client under the hood) — it's what actually issues `GET`/`PUT`/
+  client under the hood) — it's what actually issues `GET`/`POST`/`PUT`/
   `PATCH`/`DELETE` requests and turns a non-2xx response or a connection
-  failure into the right exception type. You should not need to use it
-  directly.
+  failure into the right exception type. `postWrite()` (P21) is a
+  non-retrying `POST`, used only by the two singleton settings resources
+  (`dns()`/`systemIdentity()`) whose `set` command is invoked via `POST`
+  rather than `PATCH` — see [section 7i](#7i-dns--system-identity-p21).
+  You should not need to use `RestTransport` directly.
 - **DTOs** (`RouterResource`, `HealthReading`, `InterfaceCollection`,
-  `IpAddress`, `InterfaceRecord`, etc.) are the typed objects every
+  `IpAddress`, `InterfaceRecord`, `FirewallFilterRule`, `DhcpServer`,
+  `DhcpLease`, `PppSecret`, `SimpleQueue`, `IpPool`, `IpRoute`,
+  `DnsSettings`, `SystemIdentity`, etc.) are the typed objects every
   method returns — see [section 5](#5-first-connection) for why every
   field on them is nullable.
 - **Monitoring services** (`SnapshotRecorder`, `RuleEvaluator`,
@@ -950,7 +1206,15 @@ The pieces you'll actually interact with:
 | `menu()` — generic menu access | Done (P9) | Yes | No (deliberate) | Any other RouterOS menu, raw untyped rows, read-only forever |
 | `ip()->addresses()` — IP address mgmt | Done (P13) | Yes | Yes | `list/find/add/update/remove/enable/disable`; real-device verified |
 | `interface()` — interface mgmt | Done (P14) | Yes | Yes (no add/remove) | `list/find/update/enable/disable`; real-device verified |
-| Write transport (`put/patch/delete`) | Done (P12) | — | Internal only | Not directly exposed; foundation for `ip()`/`interface()` |
+| `firewall()->filter()` — firewall filter mgmt | Done (P15) | Yes | Yes | Full CRUD + enable/disable; real-device verified |
+| `dhcp()->servers()` / `->leases()` — DHCP mgmt | Done (P16) | Yes | Yes | Full CRUD + enable/disable on both; real-device verified |
+| `ppp()->secrets()` — PPP/PPPoE secret mgmt | Done (P17) | Yes | Yes | Full CRUD + enable/disable; passwords never exposed; real-device verified |
+| `queue()->simple()` — simple queue mgmt | Done (P18) | Yes | Yes | Full CRUD + enable/disable; real-device verified |
+| `ip()->pools()` — IP pool mgmt | Done (P19) | Yes | Yes (no enable/disable) | `list/find/add/update/remove`; real-device verified |
+| `ip()->routes()` — IP route mgmt | Done (P20) | Yes | Yes | Full CRUD + enable/disable; highest-risk resource; real-device verified (isolated test route only) |
+| `dns()` — DNS settings | Done (P21) | Yes | Yes (unverified on real device) | Singleton settings menu; `get()` real-device verified, `update()` not write-tested |
+| `systemIdentity()` — system identity | Done (P21) | Yes | Yes | Singleton settings menu; `get()`/`update()` real-device verified |
+| Write transport (`put/patch/delete/postWrite`) | Done (P12/P21) | — | Internal only | Not directly exposed; foundation for every typed write resource above |
 | Opt-in retry (reads only) | Done (P9) | — | N/A | Never retries a write; never retries 401/403/4xx |
 | Monitoring snapshots | Done (P4) | Local DB | Local DB only | Stores `resource()`/`health()`/`interfaces()` output; no RouterOS writes |
 | Rules + alert lifecycle | Done (P5) | Local DB | Local DB only | Triggered/resolved lifecycle, deduplicated |
@@ -959,30 +1223,26 @@ The pieces you'll actually interact with:
 | Notifications (mail/webhook) | Done (P7) | — | External (opt-in) | Disabled by default; synchronous |
 | Analytics (`MonitoringAnalytics`) | Done (P8/P10) | Local DB only | — | No RouterOS requests of its own |
 | Production hardening (CI, concurrency, security) | Done (P11) | — | — | See [Security](#16-security), [Concurrency](#concurrency) |
-| Firewall / DHCP / PPP / Queue / Route / DNS / User management | **Planned** | No | No | See [Roadmap](#19-roadmap) |
+| User / Scheduler / advanced filtering / batch ops | **Planned** | No | No | See [Roadmap](#19-roadmap) |
 | Binary RouterOS API (port 8728/8729) | **Not planned** | No | No | REST only |
 | Multi-tenant / SaaS features | **Not planned** | — | — | — |
 
 ## 19. Roadmap
 
-**P1–P14 are complete** (see [CHANGELOG.md](CHANGELOG.md) for full,
-phase-by-phase history). Tentative order for what's planned next, most
-broadly useful first — **none of this exists yet**; exact scope and
-naming may change once each phase is actually scoped against RouterOS's
-official REST documentation and a real device, per this package's
-standing rule never to guess RouterOS behavior:
+**P1–P21 are complete** (see [CHANGELOG.md](CHANGELOG.md) for full,
+phase-by-phase history) — including firewall filter, DHCP, PPP/PPPoE
+secret, simple queue, IP pool, IP route, and DNS/system identity
+management, all real-device verified except `dns()->update()` (see
+[section 7i](#7i-dns--system-identity-p21)). Tentative order for what's
+planned next — **none of this exists yet**; exact scope and naming may
+change once each phase is actually scoped against RouterOS's official
+REST documentation and a real device, per this package's standing rule
+never to guess RouterOS behavior:
 
-- **Planned — IP Firewall Filter management** (`/ip/firewall/filter`)
-- **Planned — DHCP Server / Lease management** (`/ip/dhcp-server`, `/ip/dhcp-server/lease`)
-- **Planned — PPP/PPPoE Secret management** (`/ppp/secret`)
-- **Planned — Simple Queue management** (`/queue/simple`)
-- **Planned — IP Pool / Address Pool management** (`/ip/pool`)
-- **Planned — IP Route management** (`/ip/route`)
-- **Planned — DNS / System management** (`/ip/dns`, relevant `/system/*` write menus)
-- **Planned — User / Scheduler management** (`/user`, `/system/scheduler`)
-- **Planned — Advanced read/query/filter capabilities** (RouterOS's documented `.query`/`~` operators, once independently verified — beyond today's simple `?field=value` equality)
-- **Planned — Batch/concurrent operations and production optimization**
-- **Planned — Final security/API/documentation review**
+- **Planned — P22: User / Scheduler management** (`/user`, `/system/scheduler`)
+- **Planned — P23: Advanced read/query/filter capabilities** (RouterOS's documented `.query`/`~` operators, once independently verified — beyond today's simple `?field=value` equality)
+- **Planned — P24: Batch/concurrent operations and production optimization**
+- **Planned — P25: Final security/API/documentation review**
 
 ## Known limitations
 
@@ -995,7 +1255,9 @@ This package intentionally does **not** include:
 - Log filtering beyond simple equality (`?field=value`) — no `~`
   (contains/regex) filtering, no pagination beyond RouterOS's own log
   buffer size
-- DHCP, PPP/PPPoE, firewall, or VPN modules (see [Roadmap](#19-roadmap))
+- VPN modules beyond PPP/PPPoE secrets (no IPsec/WireGuard/OpenVPN/L2TP
+  management), wireless, bridge/VLAN, or user/scheduler management (see
+  [Roadmap](#19-roadmap))
 - A built-in schedule entry or locking for `mikrotik:monitor` — you
   register it (and `->withoutOverlapping()`) on Laravel's own scheduler
   yourself
@@ -1009,11 +1271,19 @@ This package intentionally does **not** include:
   mail/webhook notifications exist
 - Notification channels beyond mail/webhook, and no queueing of
   notification delivery (synchronous by design)
-- Any RouterOS configuration menu except `/ip/address` and `/interface` —
-  `menu()` remains read-only for everything else
+- Any RouterOS configuration menu beyond the ones listed in the
+  [Feature matrix](#18-feature-matrix) — `menu()` remains read-only for
+  everything else
 - `add()`/`remove()` for interfaces, or any interface subtype menu
   (`/interface/vlan`, `/interface/bridge`, etc.)
-- `/ip/route` or any other `/ip/*` menu beyond `/ip/address`
+- `add()`/`remove()` for `dns()`/`systemIdentity()` — both are singleton
+  settings menus RouterOS itself has no concept of "adding"/"removing"
+- `enable()`/`disable()` for `ip()->pools()` — RouterOS's `/ip/pool` has
+  no `disabled` property
+- Real-device write verification for `dns()->update()` specifically —
+  deliberately not tested against a real device (changing DNS servers
+  is functionally significant, not harmless); see
+  [section 7i](#7i-dns--system-identity-p21)
 - Retry of any kind for write operations
 - Filtering beyond simple equality on `menu()->get()`
 - A confirmed not-found behavior for `menu()->find()` on a `GET` — it
@@ -1040,8 +1310,11 @@ access to these menus yourself. `menu()` is a generic accessor: whatever
 `read` policy your user needs for a given menu is entirely between your
 RouterOS user configuration and that menu.
 
-`ip()->addresses()` and `interface()` additionally require the `write`
-policy — confirmed directly against a real device (see
+Every typed write resource (`ip()->addresses()`, `interface()`,
+`firewall()->filter()`, `dhcp()->servers()`/`leases()`,
+`ppp()->secrets()`, `queue()->simple()`, `ip()->pools()`/`routes()`,
+`systemIdentity()`) additionally requires the `write` policy —
+confirmed directly against a real device (see
 [Requirements](#2-requirements)).
 
 ## License

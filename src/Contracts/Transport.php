@@ -106,4 +106,30 @@ interface Transport
      * @throws MalformedResponseException Response could not be parsed.
      */
     public function delete(string $path): array;
+
+    /**
+     * Update a singleton "settings" menu that has no `.id` and no list
+     * form (e.g. `/system/identity`, `/ip/dns`) — maps to RouterOS's own
+     * "set" console command via REST's POST-to-command-path mechanism
+     * (the same general mechanism post() above already uses, e.g.
+     * `POST /interface/print`). This is a distinct method from post()
+     * because it is a **write**: confirmed directly against a real
+     * device (P21) that `PATCH /rest/system/identity` (no identifier —
+     * the naive guess) fails with RouterOS's own `"missing or invalid
+     * resource identifier"` (HTTP 400), while `POST
+     * /rest/system/identity/set` succeeds. Like put()/patch()/delete(),
+     * this must never use the read-path retry configuration — the same
+     * "cannot safely retry an ambiguous failure after a write already
+     * reached RouterOS" reasoning applies here exactly as it does to
+     * every other write method.
+     *
+     * @param array<string, scalar> $body
+     * @return array<string|int, mixed> Decoded response body.
+     *
+     * @throws ConnectionException        Router unreachable / timed out.
+     * @throws AuthenticationException    Credentials rejected.
+     * @throws RouterOsException          RouterOS returned an error.
+     * @throws MalformedResponseException Response could not be parsed.
+     */
+    public function postWrite(string $path, array $body = []): array;
 }

@@ -51,7 +51,8 @@ use Illuminate\Support\Facades\Http;
  * 4xx (a RouterOS-side rejection like a bad query, not a transient
  * fault) — retrying those would not change the outcome and would risk
  * hammering credentials that are simply wrong. This retry configuration
- * applies to get()/post() only -- see put()/patch()/delete() below.
+ * applies to get()/post() only -- see put()/patch()/delete()/postWrite()
+ * below.
  *
  * Write methods (P12, foundation only -- nothing in this package calls
  * these publicly yet): put()/patch()/delete() map to RouterOS REST's
@@ -110,6 +111,14 @@ class RestTransport implements Transport
         $path = $this->normalizePath($path);
 
         return $this->send($path, fn () => $this->writeClient()->delete($this->url($path)));
+    }
+
+    /** P21: a non-retrying POST write, for singleton "set" menus (see Transport::postWrite()'s docblock). */
+    public function postWrite(string $path, array $body = []): array
+    {
+        $path = $this->normalizePath($path);
+
+        return $this->send($path, fn () => $this->writeClient()->post($this->url($path), $body));
     }
 
     /** No retry -- used by get()/post() only. */
