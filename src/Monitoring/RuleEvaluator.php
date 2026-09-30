@@ -73,8 +73,17 @@ final class RuleEvaluator
             $value = (float) $value;
             $isMatch = $this->matches($value, $rule->operator, $rule->threshold);
 
+            // Scoped by connection, not just rule_id: a rule with
+            // connection=null applies to every connection (see
+            // MikrotikRule's docblock), and each one tracks its own
+            // independent active-alert state -- without this, a global
+            // rule already active for one connection would incorrectly
+            // be seen as "already active" for a second, unrelated
+            // connection too, since MikrotikAlert (not MikrotikRule)
+            // is what actually carries the connection per episode.
             $activeAlert = MikrotikAlert::query()
                 ->where('rule_id', $rule->id)
+                ->where('connection', $snapshot->connection)
                 ->active()
                 ->first();
 

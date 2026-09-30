@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Easybdit\LaravelMikrotik\Tests\Feature;
 
 use Easybdit\LaravelMikrotik\Models\MikrotikAlert;
+use Easybdit\LaravelMikrotik\Models\MikrotikIncident;
 use Easybdit\LaravelMikrotik\Models\MikrotikRule;
 use Easybdit\LaravelMikrotik\Models\MikrotikSnapshot;
 use Easybdit\LaravelMikrotik\Notifications\MikrotikAlertNotification;
@@ -162,6 +163,40 @@ class MonitorCommandTest extends TestCase
 
         // 1 for the trigger, 1 more for the resolution.
         Notification::assertSentOnDemandTimes(MikrotikAlertNotification::class, 2);
+    }
+
+    public function test_monitor_opens_and_resolves_an_incident_alongside_the_alert(): void
+    {
+        MikrotikRule::query()->create([
+            'connection' => 'default',
+            'name'       => 'High CPU load',
+            'metric'     => 'resource.cpu_load',
+            'operator'   => '>',
+            'threshold'  => 90,
+        ]);
+
+        $cpuLoads = [95, 10];
+        $call = 0;
+        Http::fake([
+            'router.test/rest/system/resource' => function () use ($cpuLoads, &$call) {
+                return Http::response([['cpu-load' => (string) $cpuLoads[$call++]]], 200);
+            },
+            'router.test/rest/system/health'    => Http::response([], 200),
+            'router.test/rest/interface'         => Http::response([], 200),
+        ]);
+
+        $this->artisan('mikrotik:monitor')->assertExitCode(Command::SUCCESS);
+
+        $this->assertDatabaseCount('mikrotik_incidents', 1);
+        $incident = MikrotikIncident::query()->sole();
+        $this->assertSame(MikrotikIncident::STATUS_OPEN, $incident->status);
+        $this->assertSame(MikrotikAlert::query()->sole()->id, $incident->first_alert_id);
+
+        $this->artisan('mikrotik:monitor')->assertExitCode(Command::SUCCESS);
+
+        // Same incident, not a new one -- resolved in place.
+        $this->assertDatabaseCount('mikrotik_incidents', 1);
+        $this->assertSame(MikrotikIncident::STATUS_RESOLVED, $incident->fresh()->status);
     }
 
     public function test_monitor_does_not_notify_when_nothing_is_configured(): void

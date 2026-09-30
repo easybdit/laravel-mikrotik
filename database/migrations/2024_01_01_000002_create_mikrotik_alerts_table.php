@@ -20,6 +20,11 @@ return new class extends Migration
             // these relations.
             $table->foreignId('rule_id')->nullable()->constrained('mikrotik_rules')->nullOnDelete();
             $table->foreignId('snapshot_id')->nullable()->constrained('mikrotik_snapshots')->nullOnDelete();
+            // No ->constrained() here: mikrotik_incidents is created in a
+            // later migration and references this table (its
+            // first_alert_id), so the FK constraint for this column is
+            // added there instead, once mikrotik_incidents exists.
+            $table->foreignId('incident_id')->nullable();
             $table->string('connection');
             $table->string('metric');
             $table->string('operator', 2);

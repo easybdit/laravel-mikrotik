@@ -16,8 +16,10 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
  * ($resolved_at recording when). RuleEvaluator never deletes or rewrites
  * a row's identity to do this — it only ever inserts a new row or flips
  * an existing row's $status/$resolved_at, so history is always
- * preserved. This still does not group repeated triggered/resolved
- * cycles into an incident (see the package README's Known limitations).
+ * preserved. $incident_id (P10) links this row to the MikrotikIncident
+ * (Monitoring\IncidentManager) that groups this rule's alert episode —
+ * see MikrotikIncident's own docblock for exactly what "grouping" means
+ * in this phase.
  *
  * $connection/$metric/$operator/$threshold/$value are stored directly
  * (not only reachable via $rule/$snapshot) so this row stays meaningful
@@ -26,6 +28,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
  * @property int $id
  * @property int|null $rule_id
  * @property int|null $snapshot_id
+ * @property int|null $incident_id
  * @property string $connection
  * @property string $metric
  * @property string $operator
@@ -46,6 +49,7 @@ class MikrotikAlert extends Model
     protected $fillable = [
         'rule_id',
         'snapshot_id',
+        'incident_id',
         'connection',
         'metric',
         'operator',
@@ -74,6 +78,18 @@ class MikrotikAlert extends Model
     public function snapshot(): BelongsTo
     {
         return $this->belongsTo(MikrotikSnapshot::class, 'snapshot_id');
+    }
+
+    /**
+     * The MikrotikIncident (P10) this alert belongs to, if any. Null for
+     * an alert recorded before P10, or one whose rule_id was null when
+     * evaluated (see Monitoring\IncidentManager).
+     *
+     * @return BelongsTo<MikrotikIncident, $this>
+     */
+    public function incident(): BelongsTo
+    {
+        return $this->belongsTo(MikrotikIncident::class, 'incident_id');
     }
 
     /** @param Builder<MikrotikAlert> $query */

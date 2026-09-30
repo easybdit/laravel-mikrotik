@@ -2,22 +2,24 @@
 
 A Laravel abstraction for MikroTik RouterOS devices.
 
-**This is P1 through P9 — an intentionally small, incrementally-grown
+**This is P1 through P10 — an intentionally small, incrementally-grown
 release.** It provides connection management and read-only retrieval of
 router resource info, hardware health, interfaces (with cumulative
 traffic counters and a one-shot rate reading), log entries, opt-in
 database persistence of point-in-time monitoring snapshots, opt-in
-threshold rules with a triggered/resolved alert lifecycle, a
-Laravel-scheduler-friendly `mikrotik:monitor` command, optional mail/
-webhook alert notifications, read-only history/trend analytics over
-already-recorded data, generic read-only RouterOS REST menu access for
-any menu this package doesn't have a named method for, and opt-in HTTP
-retry — all over the RouterOS REST API. Everything else — DHCP/PPP/
-firewall/VPN, any write/configuration operation, a binary-API transport,
-router CRUD/management, incident grouping, and AI-powered diagnosis
-(`easybdit/laravel-mikrotik-ai`, a separate future package) — is **not
-implemented yet**. See [Known limitations](#known-limitations) below for
-the authoritative list.
+threshold rules with a triggered/resolved alert lifecycle, incident
+grouping above that alert lifecycle, a Laravel-scheduler-friendly
+`mikrotik:monitor` command, optional mail/webhook alert notifications,
+read-only history/trend analytics over already-recorded data (including
+incidents), generic read-only RouterOS REST menu access for any menu
+this package doesn't have a named method for, and opt-in HTTP retry —
+all over the RouterOS REST API. Everything else — DHCP/PPP/firewall/VPN,
+any write/configuration operation, a binary-API transport, router
+CRUD/management, cross-rule incident correlation, and AI-powered
+diagnosis (`easybdit/laravel-mikrotik-ai`, a separate future package) —
+is **not implemented yet**. See
+[Known limitations](#known-limitations) below for the authoritative
+list.
 
 ## Requirements
 
@@ -404,15 +406,75 @@ Each `MikrotikAlert` carries a simple two-state lifecycle, tracked in
 alerts; a resolution or a deduplicated repeat produces no entry in the
 returned array, though the underlying row is still updated/left as-is.
 History is never deleted — query `MikrotikAlert::query()->resolved()` /
-`->active()` for either state. This phase does **not** group a rule's
-triggered/resolved cycles into an incident (see
-[Known limitations](#known-limitations); that is P10's job).
+`->active()` for either state.
+
+### Incidents (P10, built on the alert lifecycle)
+
+An alert (above) is one row per continuous triggered→resolved episode
+of one rule. An **incident** wraps that same episode in a longer-lived,
+stable record — `Monitoring\IncidentManager::reconcile()` opens one the
+moment `RuleEvaluator` creates a new `'triggered'` alert, and resolves
+it the moment that alert flips to `'resolved'`:
+
+```php
+use Easybdit\LaravelMikrotik\Monitoring\IncidentManager;
+
+$transitions = app(IncidentManager::class)->reconcile($triggeredAlerts, $justResolvedAlerts);
+
+$transitions['opened'];   // list<MikrotikIncident> newly opened this call
+$transitions['resolved']; // list<MikrotikIncident> newly resolved this call
+```
+
+`mikrotik:monitor` (P6) already calls this for you every run — see
+below. `$triggeredAlerts`/`$justResolvedAlerts` are exactly what
+`RuleEvaluator::evaluate()` returns and what the command already derives
+for its own notifications; `IncidentManager` does not re-derive rule
+matching itself.
+
+**In this phase, one incident maps one-to-one onto one alert episode** —
+P5's own alert deduplication already guarantees at most one active alert
+per rule (and, per connection, for a global rule — see below), so there
+is nothing to group across *multiple* alert rows yet:
+
+- Repeated matching snapshots reuse the same open incident (no
+  duplicate rows) — mirrors the alert's own dedup exactly.
+- A missing metric leaves an open incident untouched, the same way it
+  leaves the alert untouched — it is never treated as "resolved."
+- The same rule matching again after resolution opens a **new, separate**
+  incident, mirroring how a resolved alert matching again creates a new
+  historical alert rather than reviving the old one.
+- `MikrotikAlert::$incident_id` links an alert to its incident (nullable
+  — an alert recorded before P10, or one somehow evaluated without a
+  rule, has none). `MikrotikIncident::firstAlert()`/`alerts()` are the
+  reverse relations.
+
+Safe under two concurrent `mikrotik:monitor` processes: opening an
+incident is a single `INSERT` guarded by a real database unique index
+(`mikrotik_incidents`' `(open_rule_id, connection)`, nullable-while-open
+so any number of *resolved* incidents for the same rule/connection
+coexist freely) — if two processes race to open the same rule's
+incident, the loser's `INSERT` fails with a genuine database
+integrity-constraint error, which `IncidentManager` catches and treats
+as "the other process already opened it," not an error. This is real
+database-level protection, not a claim of distributed locking (there is
+none).
+
+Notification timing is **unchanged** by P10: `mikrotik:monitor` still
+notifies from the same alert triggered/resolved transitions it already
+did in P7 (see below) — since incident transitions currently coincide
+exactly with those, this is not a behavior change today, only correct
+groundwork for a future phase that might group multiple alert episodes
+into one incident (not implemented — see
+[Known limitations](#known-limitations)).
 
 ### Scheduled monitoring (`mikrotik:monitor`, P6)
 
 P6 adds an artisan command that ties P4 and P5 together: for one or more
 connections, it records a snapshot (`SnapshotRecorder`) and evaluates it
-(`RuleEvaluator`) in one step.
+(`RuleEvaluator`) in one step. Since P10, it also reconciles incidents
+(`IncidentManager`) from the same result and reports opened/resolved
+counts in its own console output — see
+[Incidents](#incidents-p10-built-on-the-alert-lifecycle) above.
 
 ```bash
 php artisan mikrotik:monitor                          # every configured connection
@@ -470,11 +532,11 @@ channel POSTs a JSON payload (`id`, `status`, `connection`, `metric`,
 `resolved_at`) to the configured URL. Delivery is synchronous (no
 queueing) — queue it yourself if you need that.
 
-### Monitoring analytics (P8)
+### Monitoring analytics (P8, extended in P10)
 
 P8 adds read-only history/trend queries over data P4 and P5 already
 store — it makes **no RouterOS requests of its own** and does not change
-`mikrotik_snapshots`/`mikrotik_alerts` in any way.
+`mikrotik_snapshots`/`mikrotik_alerts`/`mikrotik_incidents` in any way.
 
 ```php
 use Easybdit\LaravelMikrotik\Monitoring\MonitoringAnalytics;
@@ -487,6 +549,12 @@ $analytics->interfaceCounterTrend('branch-01', 'ether1', 'rx_error'); // also co
 $analytics->interfaceRateHistory('branch-01', 'ether1', 'rx_byte');
 $analytics->alertHistory('branch-01');
 $analytics->alertCountsByRuleMetric('branch-01');
+
+// P10:
+$analytics->openIncidents('branch-01');              // what's ongoing right now
+$analytics->incidentHistory('branch-01');             // any status, oldest first
+$analytics->incidentCountsByRule('branch-01');        // "which problem recurs most"
+$analytics->averageIncidentDurationSeconds('branch-01'); // resolved incidents only; null if none
 ```
 
 `interfaceRateHistory()` computes a per-second rate between each pair of
@@ -496,8 +564,12 @@ RouterOS's own live one-shot reading at the moment of the call. A pair
 where the counter decreased (RouterOS resets these on interface reset —
 typically a reboot) is reported as `rate_per_second: null, counter_reset:
 true` rather than a misleading negative number. Every query here filters
-first on the `connection` + `captured_at`/`triggered_at` columns already
-indexed by the P4/P5 migrations before touching a row's JSON columns.
+first on the `connection` + `captured_at`/`triggered_at`/`opened_at`
+columns already indexed by the P4/P5/P10 migrations before touching a
+row's JSON columns. `averageIncidentDurationSeconds()` computes the
+average in PHP from `opened_at`/`resolved_at` (the same portable
+approach `interfaceRateHistory()` already uses), not a
+database-specific date-diff function.
 
 ### Why `health()` doesn't return a fixed object
 
@@ -582,6 +654,13 @@ try {
   new place where the `Authorization` header could be logged/echoed —
   the same request-building code path (and the same never-log-a-request
   rule) is reused for every attempt.
+- P10's `mikrotik_incidents` table is the same: it stores only
+  `rule_id`/`connection`/`metric`/status/timestamps derived from
+  `mikrotik_alerts`, which already stores no credentials. Opening an
+  incident is protected by a real database unique index (not an
+  application-level check with a race window), so a duplicate-open
+  attempt fails as a database integrity error, caught and handled by
+  `IncidentManager` — never silently retried, never logged.
 
 ## Testing
 
@@ -616,19 +695,24 @@ This package intentionally does **not** include:
   [Scheduled monitoring](#scheduled-monitoring-mikrotikmonitor-p6))
 - Any config-file or artisan-command way to define a `MikrotikRule` —
   create one directly via Eloquent (P5)
-- Grouping of a `MikrotikAlert` (P5)'s triggered/resolved cycles into an
-  incident — each cycle is an independent historical row; triggered/
-  resolved status and deduplication of an already-active alert are
-  supported (see [Rules and alerts](#rules-and-alerts-opt-in-built-on-snapshots))
+- Cross-rule incident correlation — an incident (P10) groups exactly one
+  rule's own triggered/resolved episode; it does not attempt to relate
+  incidents from *different* rules that might share a root cause
+- Grouping *multiple* alert episodes of the same rule into one incident
+  (e.g. brief flapping in and out of the threshold) — P10 maps one
+  incident to exactly one alert episode; a rule that resolves and
+  re-matches shortly after always opens a new, separate incident, never
+  reopens the previous one (see
+  [Incidents](#incidents-p10-built-on-the-alert-lifecycle))
 - Any framework event (Laravel event/listener) dispatched when a
-  snapshot is recorded or an alert fires — P7 added mail/webhook
-  *notifications* specifically (see
+  snapshot is recorded, an alert fires, or an incident opens/resolves —
+  P7 added mail/webhook *notifications* specifically (see
   [Notifications](#notifications-opt-in-p7)), but there is no general
   `Illuminate\Events` hook yet
 - Notification channels beyond mail/webhook (no Slack, SMS, etc.), and
   no queueing of notification delivery (P7 is synchronous by design)
 - Any way to change RouterOS's own configuration — every phase through
-  P9 is strictly read-only plus this package's own database records (no
+  P10 is strictly read-only plus this package's own database records (no
   router CRUD/management yet, and `menu()` (P9) is GET-only — no
   `add()`/`set()`/`remove()`/`enable()`/`disable()`)
 - Filtering beyond simple equality on `menu()->get()` — no RouterOS

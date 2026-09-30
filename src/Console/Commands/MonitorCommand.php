@@ -7,6 +7,7 @@ namespace Easybdit\LaravelMikrotik\Console\Commands;
 use Easybdit\LaravelMikrotik\Exceptions\MikrotikException;
 use Easybdit\LaravelMikrotik\Models\MikrotikAlert;
 use Easybdit\LaravelMikrotik\Monitoring\AlertNotifier;
+use Easybdit\LaravelMikrotik\Monitoring\IncidentManager;
 use Easybdit\LaravelMikrotik\Monitoring\RuleEvaluator;
 use Easybdit\LaravelMikrotik\Monitoring\SnapshotRecorder;
 use Illuminate\Console\Command;
@@ -37,7 +38,12 @@ use Illuminate\Contracts\Config\Repository as ConfigRepository;
  * notifications (AlertNotifier) for every alert that newly became
  * 'triggered' or 'resolved' during this run -- a no-op unless the host
  * application has configured a mail/webhook route (see
- * config('mikrotik.notifications')).
+ * config('mikrotik.notifications')) -- and reconciles P10 incidents
+ * (IncidentManager) from the same triggered/resolved alerts. Incident
+ * transitions currently coincide exactly with these alert transitions
+ * (see IncidentManager's docblock for why), so notification timing is
+ * unchanged by P10; incident counts are only added to this command's
+ * own console output.
  */
 class MonitorCommand extends Command
 {
@@ -49,6 +55,7 @@ class MonitorCommand extends Command
     public function handle(
         SnapshotRecorder $recorder,
         RuleEvaluator $evaluator,
+        IncidentManager $incidents,
         AlertNotifier $notifier,
         ConfigRepository $config
     ): int {
@@ -77,13 +84,17 @@ class MonitorCommand extends Command
                     ))
                     ->get();
 
+                $transitions = $incidents->reconcile($triggered, $justResolved);
+
                 foreach ([...$triggered, ...$justResolved->all()] as $alert) {
                     $notifier->notify($alert);
                 }
 
                 $this->components->info(
                     "[{$name}] snapshot #{$snapshot->id} recorded, " . count($triggered) . ' triggered, '
-                        . $justResolved->count() . ' resolved.'
+                        . $justResolved->count() . ' resolved, '
+                        . count($transitions['opened']) . ' incident(s) opened, '
+                        . count($transitions['resolved']) . ' incident(s) resolved.'
                 );
                 $succeeded++;
             } catch (MikrotikException $e) {

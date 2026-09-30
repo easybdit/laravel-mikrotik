@@ -2,6 +2,51 @@
 
 All notable changes to `easybdit/laravel-mikrotik` are documented here.
 
+## P10 — Incident grouping over the alert lifecycle
+
+- Added `Models\MikrotikIncident` and `Monitoring\IncidentManager`:
+  groups a rule's P5 triggered/resolved alert episode into a longer-lived
+  record. `IncidentManager::reconcile($triggeredAlerts, $justResolvedAlerts)`
+  opens an incident for a newly-triggered alert and resolves the matching
+  open one when that alert's condition clears — it does not re-derive
+  rule-matching logic, only reacts to alert state its caller (currently
+  `mikrotik:monitor`) already computed.
+- In this phase, one incident maps one-to-one onto one alert episode: a
+  missing metric does not resolve an open incident, and a rule matching
+  again after resolution always opens a new, separate incident rather
+  than reopening the old one — mirroring P5's own alert dedup/resolution
+  behavior exactly. No cross-rule correlation or multi-episode grouping
+  (e.g. flapping) is attempted.
+- Added `mikrotik_incidents` (new migration) and `mikrotik_alerts.incident_id`
+  (added to the existing, still-unreleased P5 migration rather than a
+  separate one) linking an alert to its incident. Opening an incident is
+  protected by a real database unique index
+  (`(open_rule_id, connection)`, nullable while not open) rather than an
+  application-level check — a concurrent duplicate-open attempt fails as
+  a database integrity error, which `IncidentManager` catches and treats
+  as "already opened by another process," not an error.
+- `mikrotik:monitor` (P6) now also reconciles incidents every run and
+  reports opened/resolved counts in its console output. Notification
+  timing (P7) is unchanged — incident transitions currently coincide
+  exactly with the alert transitions it already notified on.
+- Extended `Monitoring\MonitoringAnalytics` (P8) with `openIncidents()`,
+  `incidentHistory()`, `incidentCountsByRule()`, and
+  `averageIncidentDurationSeconds()` (computed in PHP from
+  `opened_at`/`resolved_at`, the same portable approach
+  `interfaceRateHistory()` already used, not a database-specific
+  date-diff function).
+- Fixed a pre-existing P5 bug found while building this phase's own
+  required "global rule" test: `RuleEvaluator`'s dedup lookup filtered
+  only by `rule_id`, not `connection` — a rule with `connection: null`
+  (applies to every connection) already active for one connection was
+  incorrectly treated as "already active" for a second, unrelated
+  connection too, silently suppressing that connection's own alert. Now
+  scoped by `(rule_id, connection)`, matching how `MikrotikAlert` itself
+  already stores connection per episode. No existing single-connection
+  test's behavior changes; a dedicated regression test was added.
+- No changes to any P1-P9 public API; entirely additive aside from the
+  RuleEvaluator fix above.
+
 ## P9 — Generic read-only menu access + opt-in retry
 
 - Added `RouterConnection::menu(string $path): Connection\Menu`: generic,

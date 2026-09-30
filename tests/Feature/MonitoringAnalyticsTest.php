@@ -5,8 +5,10 @@ declare(strict_types=1);
 namespace Easybdit\LaravelMikrotik\Tests\Feature;
 
 use Easybdit\LaravelMikrotik\Models\MikrotikAlert;
+use Easybdit\LaravelMikrotik\Models\MikrotikIncident;
 use Easybdit\LaravelMikrotik\Models\MikrotikRule;
 use Easybdit\LaravelMikrotik\Models\MikrotikSnapshot;
+use Easybdit\LaravelMikrotik\Monitoring\IncidentManager;
 use Easybdit\LaravelMikrotik\Monitoring\MonitoringAnalytics;
 use Easybdit\LaravelMikrotik\Monitoring\RuleEvaluator;
 use Easybdit\LaravelMikrotik\Tests\TestCase;
@@ -182,5 +184,127 @@ class MonitoringAnalyticsTest extends TestCase
         $this->assertSame($rule->id, $counts[0]['rule_id']);
         $this->assertSame('resource.cpu_load', $counts[0]['metric']);
         $this->assertSame(2, $counts[0]['count']);
+    }
+
+    /** @return array{triggered: list<MikrotikAlert>, justResolved: \Illuminate\Database\Eloquent\Collection<int, MikrotikAlert>} */
+    private function evaluateAndDiff(RuleEvaluator $evaluator, MikrotikSnapshot $snapshot): array
+    {
+        $activeIdsBefore = MikrotikAlert::query()->forConnection($snapshot->connection)->active()->pluck('id');
+        $triggered = $evaluator->evaluate($snapshot);
+        $justResolved = MikrotikAlert::query()
+            ->whereIn('id', $activeIdsBefore->diff(
+                MikrotikAlert::query()->forConnection($snapshot->connection)->active()->pluck('id')
+            ))
+            ->get();
+
+        return ['triggered' => $triggered, 'justResolved' => $justResolved];
+    }
+
+    public function test_open_incidents_returns_only_currently_open_ones_for_the_connection(): void
+    {
+        $rule = MikrotikRule::query()->create([
+            'connection' => 'default', 'name' => 'High CPU', 'metric' => 'resource.cpu_load',
+            'operator' => '>', 'threshold' => 90,
+        ]);
+
+        $evaluator = new RuleEvaluator();
+        $incidents = new IncidentManager();
+
+        $r = $this->evaluateAndDiff($evaluator, $this->makeSnapshot('default', Carbon::parse('2026-01-01 00:00:00'), 95, 1));
+        $incidents->reconcile($r['triggered'], $r['justResolved']);
+
+        $open = (new MonitoringAnalytics())->openIncidents('default');
+
+        $this->assertCount(1, $open);
+        $this->assertSame($rule->id, $open->first()->rule_id);
+        $this->assertSame(MikrotikIncident::STATUS_OPEN, $open->first()->status);
+    }
+
+    public function test_incident_history_and_counts_by_rule_and_average_duration(): void
+    {
+        $rule = MikrotikRule::query()->create([
+            'connection' => 'default', 'name' => 'High CPU', 'metric' => 'resource.cpu_load',
+            'operator' => '>', 'threshold' => 90,
+        ]);
+
+        $evaluator = new RuleEvaluator();
+        $incidentManager = new IncidentManager();
+
+        // RuleEvaluator stamps triggered_at/resolved_at with the real
+        // wall-clock time (correct production behavior -- it does not
+        // trust a caller-supplied snapshot timestamp for that), so
+        // opened_at/resolved_at are set explicitly here afterward to get
+        // deterministic, well-separated durations for this test.
+        $r1 = $this->evaluateAndDiff($evaluator, $this->makeSnapshot('default', Carbon::parse('2026-01-01 00:00:00'), 95, 1));
+        $incidentManager->reconcile($r1['triggered'], $r1['justResolved']);
+        $r2 = $this->evaluateAndDiff($evaluator, $this->makeSnapshot('default', Carbon::parse('2026-01-01 00:10:00'), 10, 1));
+        $incidentManager->reconcile($r2['triggered'], $r2['justResolved']);
+        // Incident 1: open 00:00, resolve 00:10 -- 600s duration.
+        MikrotikIncident::query()->where('id', $r1['triggered'][0]->fresh()->incident_id)->update([
+            'opened_at' => Carbon::parse('2026-01-01 00:00:00'),
+            'resolved_at' => Carbon::parse('2026-01-01 00:10:00'),
+        ]);
+
+        $r3 = $this->evaluateAndDiff($evaluator, $this->makeSnapshot('default', Carbon::parse('2026-01-01 00:20:00'), 95, 1));
+        $incidentManager->reconcile($r3['triggered'], $r3['justResolved']);
+        $r4 = $this->evaluateAndDiff($evaluator, $this->makeSnapshot('default', Carbon::parse('2026-01-01 00:40:00'), 10, 1));
+        $incidentManager->reconcile($r4['triggered'], $r4['justResolved']);
+        // Incident 2: open 00:20, resolve 00:40 -- 1200s duration.
+        MikrotikIncident::query()->where('id', $r3['triggered'][0]->fresh()->incident_id)->update([
+            'opened_at' => Carbon::parse('2026-01-01 00:20:00'),
+            'resolved_at' => Carbon::parse('2026-01-01 00:40:00'),
+        ]);
+
+        $analytics = new MonitoringAnalytics();
+
+        $history = $analytics->incidentHistory('default');
+        $this->assertCount(2, $history);
+        $this->assertTrue($history[0]->opened_at->lessThan($history[1]->opened_at));
+
+        $counts = $analytics->incidentCountsByRule('default');
+        $this->assertCount(1, $counts);
+        $this->assertSame($rule->id, $counts[0]['rule_id']);
+        $this->assertSame(2, $counts[0]['count']);
+
+        // (600 + 1200) / 2 = 900 seconds.
+        $this->assertSame(900.0, $analytics->averageIncidentDurationSeconds('default'));
+    }
+
+    public function test_average_incident_duration_is_null_when_none_are_resolved_yet(): void
+    {
+        MikrotikRule::query()->create([
+            'connection' => 'default', 'name' => 'High CPU', 'metric' => 'resource.cpu_load',
+            'operator' => '>', 'threshold' => 90,
+        ]);
+
+        $evaluator = new RuleEvaluator();
+        $incidentManager = new IncidentManager();
+        $r = $this->evaluateAndDiff($evaluator, $this->makeSnapshot('default', Carbon::parse('2026-01-01'), 95, 1));
+        $incidentManager->reconcile($r['triggered'], $r['justResolved']);
+
+        $this->assertNull((new MonitoringAnalytics())->averageIncidentDurationSeconds('default'));
+    }
+
+    public function test_incident_analytics_are_isolated_per_connection(): void
+    {
+        MikrotikRule::query()->create([
+            'connection' => null, 'name' => 'Global high CPU', 'metric' => 'resource.cpu_load',
+            'operator' => '>', 'threshold' => 90,
+        ]);
+
+        $evaluator = new RuleEvaluator();
+        $incidentManager = new IncidentManager();
+
+        $rDefault = $this->evaluateAndDiff($evaluator, $this->makeSnapshot('default', Carbon::parse('2026-01-01'), 95, 1));
+        $incidentManager->reconcile($rDefault['triggered'], $rDefault['justResolved']);
+
+        $rBranch = $this->evaluateAndDiff($evaluator, $this->makeSnapshot('branch-01', Carbon::parse('2026-01-01'), 95, 1));
+        $incidentManager->reconcile($rBranch['triggered'], $rBranch['justResolved']);
+
+        $analytics = new MonitoringAnalytics();
+        $this->assertCount(1, $analytics->openIncidents('default'));
+        $this->assertCount(1, $analytics->openIncidents('branch-01'));
+        $this->assertCount(1, $analytics->incidentHistory('default'));
+        $this->assertCount(1, $analytics->incidentHistory('branch-01'));
     }
 }

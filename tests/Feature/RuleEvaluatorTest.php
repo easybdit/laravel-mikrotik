@@ -114,6 +114,32 @@ class RuleEvaluatorTest extends TestCase
         $this->assertSame('branch-01', $alerts[0]->connection);
     }
 
+    public function test_a_global_rule_tracks_independent_active_alerts_per_connection(): void
+    {
+        // Regression guard: the dedup lookup in evaluate() must scope by
+        // connection, not just rule_id -- a global rule already active
+        // for one connection must not be mistaken for "already active"
+        // on a second, unrelated connection (found while building P10's
+        // incident grouping, which relies on this being correct).
+        MikrotikRule::query()->create([
+            'connection' => null,
+            'name'       => 'Global CPU rule',
+            'metric'     => 'resource.cpu_load',
+            'operator'   => '>',
+            'threshold'  => 90,
+        ]);
+
+        $evaluator = new RuleEvaluator();
+
+        $defaultAlerts = $evaluator->evaluate($this->makeSnapshot('default'));
+        $branchAlerts = $evaluator->evaluate($this->makeSnapshot('branch-01'));
+
+        $this->assertCount(1, $defaultAlerts, 'default connection must still get its own alert');
+        $this->assertCount(1, $branchAlerts, 'branch-01 must get its own alert, not be deduped against default');
+        $this->assertNotSame($defaultAlerts[0]->id, $branchAlerts[0]->id);
+        $this->assertDatabaseCount('mikrotik_alerts', 2);
+    }
+
     public function test_a_rule_scoped_to_a_different_connection_is_not_evaluated(): void
     {
         MikrotikRule::query()->create([

@@ -7,6 +7,7 @@ namespace Easybdit\LaravelMikrotik;
 use Easybdit\LaravelMikrotik\Connection\ConnectionManager;
 use Easybdit\LaravelMikrotik\Console\Commands\MonitorCommand;
 use Easybdit\LaravelMikrotik\Monitoring\AlertNotifier;
+use Easybdit\LaravelMikrotik\Monitoring\IncidentManager;
 use Easybdit\LaravelMikrotik\Monitoring\MonitoringAnalytics;
 use Easybdit\LaravelMikrotik\Monitoring\RuleEvaluator;
 use Easybdit\LaravelMikrotik\Monitoring\SnapshotRecorder;
@@ -30,6 +31,10 @@ class MikrotikServiceProvider extends ServiceProvider
 
         $this->app->singleton(RuleEvaluator::class, function () {
             return new RuleEvaluator();
+        });
+
+        $this->app->singleton(IncidentManager::class, function () {
+            return new IncidentManager();
         });
 
         $this->app->singleton(AlertNotifier::class, function ($app) {
@@ -60,6 +65,8 @@ class MikrotikServiceProvider extends ServiceProvider
                     => $this->app->databasePath('migrations/2024_01_01_000001_create_mikrotik_rules_table.php'),
                 __DIR__ . '/../database/migrations/2024_01_01_000002_create_mikrotik_alerts_table.php'
                     => $this->app->databasePath('migrations/2024_01_01_000002_create_mikrotik_alerts_table.php'),
+                __DIR__ . '/../database/migrations/2024_01_01_000003_create_mikrotik_incidents_table.php'
+                    => $this->app->databasePath('migrations/2024_01_01_000003_create_mikrotik_incidents_table.php'),
             ], 'mikrotik-migrations');
         }
     }
@@ -71,6 +78,7 @@ class MikrotikServiceProvider extends ServiceProvider
             ConnectionManager::class,
             SnapshotRecorder::class,
             RuleEvaluator::class,
+            IncidentManager::class,
             AlertNotifier::class,
             MonitoringAnalytics::class,
         ];

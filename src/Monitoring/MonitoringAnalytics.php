@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Easybdit\LaravelMikrotik\Monitoring;
 
 use Easybdit\LaravelMikrotik\Models\MikrotikAlert;
+use Easybdit\LaravelMikrotik\Models\MikrotikIncident;
 use Easybdit\LaravelMikrotik\Models\MikrotikSnapshot;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Arr;
@@ -152,6 +153,79 @@ final class MonitoringAnalytics
                 'count'   => (int) $row->aggregate,
             ])
             ->all();
+    }
+
+    /**
+     * Incidents (P10) currently open for $connection, oldest first --
+     * "what's ongoing right now."
+     *
+     * @return Collection<int, MikrotikIncident>
+     */
+    public function openIncidents(string $connection): Collection
+    {
+        return MikrotikIncident::query()->forConnection($connection)->open()->orderBy('opened_at')->get();
+    }
+
+    /**
+     * Incidents (any status) within the given window, oldest first.
+     *
+     * @return Collection<int, MikrotikIncident>
+     */
+    public function incidentHistory(string $connection, ?Carbon $since = null, ?Carbon $until = null): Collection
+    {
+        return $this->incidentsQuery($connection, $since, $until)->orderBy('opened_at')->get();
+    }
+
+    /**
+     * How many incidents each rule opened within the given window --
+     * "which problem recurs most."
+     *
+     * @return list<array{rule_id: int|null, count: int}>
+     */
+    public function incidentCountsByRule(string $connection, ?Carbon $since = null, ?Carbon $until = null): array
+    {
+        return $this->incidentsQuery($connection, $since, $until)
+            ->selectRaw('rule_id, count(*) as aggregate')
+            ->groupBy('rule_id')
+            ->get()
+            ->map(fn ($row) => ['rule_id' => $row->rule_id, 'count' => (int) $row->aggregate])
+            ->all();
+    }
+
+    /**
+     * Average duration, in seconds, of every *resolved* incident within
+     * the given window (still-open incidents have no duration yet, and
+     * are excluded rather than counted as zero). Computed in PHP from
+     * $opened_at/$resolved_at, the same portable approach
+     * interfaceRateHistory() already uses, rather than a
+     * database-specific date-diff function.
+     *
+     * @return float|null Null if there are no resolved incidents in the window.
+     */
+    public function averageIncidentDurationSeconds(string $connection, ?Carbon $since = null, ?Carbon $until = null): ?float
+    {
+        $durations = $this->incidentsQuery($connection, $since, $until)
+            ->resolved()
+            ->get(['opened_at', 'resolved_at'])
+            ->map(fn (MikrotikIncident $i) => $i->resolved_at->getTimestamp() - $i->opened_at->getTimestamp());
+
+        return $durations->isEmpty() ? null : $durations->avg();
+    }
+
+    /** @return Builder<MikrotikIncident> */
+    private function incidentsQuery(string $connection, ?Carbon $since, ?Carbon $until): Builder
+    {
+        $query = MikrotikIncident::query()->forConnection($connection);
+
+        if ($since !== null) {
+            $query->where('opened_at', '>=', $since);
+        }
+
+        if ($until !== null) {
+            $query->where('opened_at', '<=', $until);
+        }
+
+        return $query;
     }
 
     /**
