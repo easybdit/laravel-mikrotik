@@ -32,14 +32,17 @@ All notable changes to `easybdit/laravel-mikrotik` are documented here.
   `remove()`/`enable()`/`disable()` validate `$id` against the same
   allow-list `Connection\Menu` already uses (own copy — `Menu` itself is
   untouched).
-- **Real-device verification: pending, not skipped.** The configured
-  test device (`laravel_13_rnd`) returned a connection timeout (not the
-  previously-observed HTTP 401 credential rejection — a different
-  failure mode, recorded here rather than assumed) when this phase
-  attempted one read-only connectivity check; no write was attempted
-  against it. Verified with `Http::fake()` against official
-  documentation only, per this phase's own stop-and-report rule for an
-  unreachable device.
+- **Real-device verification: still pending, not skipped.** Two
+  separate read-only connectivity attempts against the configured test
+  device (`laravel_13_rnd`), on two different occasions: the first
+  returned a connection timeout; a follow-up attempt reached the device
+  successfully but had its credentials rejected (HTTP 401) — two
+  different failure modes, both recorded as observed rather than
+  assumed. No write was attempted against the device either time (both
+  stopped at connectivity/auth, before any `/ip/address` request could
+  be made). Verified with `Http::fake()` against official documentation
+  only, per this phase's own stop-and-report rule for an
+  unreachable/unauthenticated device.
 - No changes to any P1-P12 public API. 208 tests, 496 assertions (up
   from 180), composer validate clean, php -l clean.
 

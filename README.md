@@ -329,11 +329,15 @@ API root either. Every RouterOS-side failure (400/404/etc.) surfaces as
 the existing `RouterOsException`, exactly like every other method in
 this package.
 
-**Real-device verification: pending.** This phase is verified with
-`Http::fake()` against MikroTik's own documented request/response
-examples (`help.mikrotik.com` "REST API") only — the configured test
-device was unreachable (connection timeout) when this phase was built.
-One specific detail is unconfirmed pending a real device: whether a
+**Real-device verification: still pending.** This phase is verified
+with `Http::fake()` against MikroTik's own documented request/response
+examples (`help.mikrotik.com` "REST API") only. Two separate read-only
+connectivity attempts against the configured test device, on two
+different occasions, each stopped before reaching `/ip/address`: a
+connection timeout, then (later) the device reachable but its
+credentials rejected (HTTP 401) — recorded as observed, not assumed
+unchanged between attempts. No write has been attempted against a real
+device. One specific detail is unconfirmed pending a real device: whether a
 boolean field like `disabled` must be sent as the string `"true"`/
 `"false"` (this package's assumption, matching what GET already
 confirmed RouterOS returns) or the classic console `"yes"`/`"no"` —
@@ -856,8 +860,9 @@ This package intentionally does **not** include:
 - Real-device confirmation of `enable()`/`disable()`'s wire format for
   the `disabled` field (`"true"`/`"false"` assumed, matching GET's own
   confirmed convention, but not independently verified for a write body
-  — the configured test device was unreachable when P13 was built; see
-  [IP address management](#ip-address-management-p13))
+  — two separate real-device connectivity attempts (a timeout, then a
+  credentials rejection) both stopped before any `/ip/address` request
+  could be made; see [IP address management](#ip-address-management-p13))
 - IP address routes/`/ip/route` and any other `/ip/*` menu — P13
   implements `ip()->addresses()` only
 - Retry of any kind for write operations — P12's `put()`/`patch()`/
