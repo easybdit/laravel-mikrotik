@@ -9,11 +9,15 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 /**
- * One historical record of a MikrotikRule matching a MikrotikSnapshot,
- * written by Monitoring\RuleEvaluator. This is an immutable log entry,
- * not a stateful "active/resolved" alert — this phase (P5) does not
- * track whether a condition is still ongoing or group repeated firings
- * into an incident (see the package README's Known limitations).
+ * One record of a MikrotikRule matching a MikrotikSnapshot, written by
+ * Monitoring\RuleEvaluator. Carries a simple two-state lifecycle:
+ * 'triggered' while the condition is still considered ongoing, and
+ * 'resolved' once a later evaluation of the same rule no longer matches
+ * ($resolved_at recording when). RuleEvaluator never deletes or rewrites
+ * a row's identity to do this — it only ever inserts a new row or flips
+ * an existing row's $status/$resolved_at, so history is always
+ * preserved. This still does not group repeated triggered/resolved
+ * cycles into an incident (see the package README's Known limitations).
  *
  * $connection/$metric/$operator/$threshold/$value are stored directly
  * (not only reachable via $rule/$snapshot) so this row stays meaningful
@@ -27,12 +31,17 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
  * @property string $operator
  * @property float $threshold
  * @property float $value
+ * @property string $status
  * @property string|null $message
  * @property \Illuminate\Support\Carbon $triggered_at
+ * @property \Illuminate\Support\Carbon|null $resolved_at
  */
 class MikrotikAlert extends Model
 {
     protected $table = 'mikrotik_alerts';
+
+    public const STATUS_TRIGGERED = 'triggered';
+    public const STATUS_RESOLVED = 'resolved';
 
     protected $fillable = [
         'rule_id',
@@ -42,14 +51,17 @@ class MikrotikAlert extends Model
         'operator',
         'threshold',
         'value',
+        'status',
         'message',
         'triggered_at',
+        'resolved_at',
     ];
 
     protected $casts = [
         'threshold'    => 'float',
         'value'        => 'float',
         'triggered_at' => 'datetime',
+        'resolved_at'  => 'datetime',
     ];
 
     /** @return BelongsTo<MikrotikRule, $this> */
@@ -68,5 +80,17 @@ class MikrotikAlert extends Model
     public function scopeForConnection(Builder $query, string $name): Builder
     {
         return $query->where('connection', $name);
+    }
+
+    /** Alerts whose condition is still considered ongoing. @param Builder<MikrotikAlert> $query */
+    public function scopeActive(Builder $query): Builder
+    {
+        return $query->where('status', self::STATUS_TRIGGERED);
+    }
+
+    /** @param Builder<MikrotikAlert> $query */
+    public function scopeResolved(Builder $query): Builder
+    {
+        return $query->where('status', self::STATUS_RESOLVED);
     }
 }

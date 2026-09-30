@@ -46,6 +46,8 @@ class RuleEvaluatorTest extends TestCase
         $this->assertSame(90.0, $alerts[0]->threshold);
         $this->assertSame('High CPU load', $alerts[0]->message);
         $this->assertNotNull($alerts[0]->triggered_at);
+        $this->assertSame(MikrotikAlert::STATUS_TRIGGERED, $alerts[0]->status);
+        $this->assertNull($alerts[0]->resolved_at);
     }
 
     public function test_rule_not_matching_its_threshold_creates_no_alert(): void
@@ -199,6 +201,127 @@ class RuleEvaluatorTest extends TestCase
             'operator'   => '>',
             'threshold'  => 1,
         ]);
+    }
+
+    public function test_repeated_matching_evaluation_does_not_duplicate_the_active_alert(): void
+    {
+        $rule = MikrotikRule::query()->create([
+            'connection' => 'default',
+            'name'       => 'High CPU load',
+            'metric'     => 'resource.cpu_load',
+            'operator'   => '>',
+            'threshold'  => 90,
+        ]);
+
+        $evaluator = new RuleEvaluator();
+
+        $first = $evaluator->evaluate($this->makeSnapshot());
+        $this->assertCount(1, $first);
+        $this->assertDatabaseCount('mikrotik_alerts', 1);
+
+        // Same condition, a later snapshot -- evaluated again.
+        $second = $evaluator->evaluate($this->makeSnapshot());
+        $this->assertCount(0, $second, 'a still-active alert must not be duplicated');
+        $this->assertDatabaseCount('mikrotik_alerts', 1);
+
+        $alert = MikrotikAlert::query()->where('rule_id', $rule->id)->sole();
+        $this->assertSame(MikrotikAlert::STATUS_TRIGGERED, $alert->status);
+        $this->assertNull($alert->resolved_at);
+    }
+
+    public function test_condition_no_longer_matching_resolves_the_active_alert(): void
+    {
+        $rule = MikrotikRule::query()->create([
+            'connection' => 'default',
+            'name'       => 'High CPU load',
+            'metric'     => 'resource.cpu_load',
+            'operator'   => '>',
+            'threshold'  => 90,
+        ]);
+
+        $evaluator = new RuleEvaluator();
+
+        $evaluator->evaluate($this->makeSnapshot()); // cpu_load 95 -- triggers
+
+        $normalSnapshot = MikrotikSnapshot::query()->create([
+            'connection'  => 'default',
+            'captured_at' => now(),
+            'resource'    => ['cpu_load' => 10],
+            'health'      => [],
+            'interfaces'  => [],
+        ]);
+
+        $alerts = $evaluator->evaluate($normalSnapshot);
+
+        $this->assertCount(0, $alerts, 'resolving an alert must not itself be reported as a new one');
+        $this->assertDatabaseCount('mikrotik_alerts', 1);
+
+        $alert = MikrotikAlert::query()->where('rule_id', $rule->id)->sole();
+        $this->assertSame(MikrotikAlert::STATUS_RESOLVED, $alert->status);
+        $this->assertNotNull($alert->resolved_at);
+    }
+
+    public function test_resolved_alert_matching_again_creates_a_new_historical_alert(): void
+    {
+        $rule = MikrotikRule::query()->create([
+            'connection' => 'default',
+            'name'       => 'High CPU load',
+            'metric'     => 'resource.cpu_load',
+            'operator'   => '>',
+            'threshold'  => 90,
+        ]);
+
+        $evaluator = new RuleEvaluator();
+
+        // Trigger, then resolve.
+        $evaluator->evaluate($this->makeSnapshot());
+        $evaluator->evaluate(MikrotikSnapshot::query()->create([
+            'connection' => 'default', 'captured_at' => now(),
+            'resource' => ['cpu_load' => 10], 'health' => [], 'interfaces' => [],
+        ]));
+        $this->assertDatabaseCount('mikrotik_alerts', 1);
+
+        // Trigger again -- must be a new, separate row, not a revived one.
+        $thirdAlerts = $evaluator->evaluate($this->makeSnapshot());
+
+        $this->assertCount(1, $thirdAlerts);
+        $this->assertDatabaseCount('mikrotik_alerts', 2);
+
+        $all = MikrotikAlert::query()->where('rule_id', $rule->id)->orderBy('id')->get();
+        $this->assertSame(MikrotikAlert::STATUS_RESOLVED, $all[0]->status);
+        $this->assertNotNull($all[0]->resolved_at);
+        $this->assertSame(MikrotikAlert::STATUS_TRIGGERED, $all[1]->status);
+        $this->assertNull($all[1]->resolved_at);
+        $this->assertSame(1, MikrotikAlert::query()->where('rule_id', $rule->id)->active()->count());
+        $this->assertSame(1, MikrotikAlert::query()->where('rule_id', $rule->id)->resolved()->count());
+    }
+
+    public function test_missing_metric_leaves_an_existing_active_alert_untouched(): void
+    {
+        $rule = MikrotikRule::query()->create([
+            'connection' => 'default',
+            'name'       => 'CPU too hot',
+            'metric'     => 'health.cpu-temperature.value',
+            'operator'   => '>=',
+            'threshold'  => 70,
+        ]);
+
+        $evaluator = new RuleEvaluator();
+        $evaluator->evaluate($this->makeSnapshot()); // health.cpu-temperature.value = 72 -- triggers
+
+        // A later snapshot where this device's health payload doesn't
+        // include the sensor at all (e.g. a transient/partial read).
+        $sparseSnapshot = MikrotikSnapshot::query()->create([
+            'connection' => 'default', 'captured_at' => now(),
+            'resource' => ['cpu_load' => 1], 'health' => [], 'interfaces' => [],
+        ]);
+
+        $alerts = $evaluator->evaluate($sparseSnapshot);
+
+        $this->assertCount(0, $alerts);
+        $alert = MikrotikAlert::query()->where('rule_id', $rule->id)->sole();
+        $this->assertSame(MikrotikAlert::STATUS_TRIGGERED, $alert->status, 'missing metric must not resolve an active alert');
+        $this->assertNull($alert->resolved_at);
     }
 
     public function test_alerts_can_be_scoped_to_a_connection(): void

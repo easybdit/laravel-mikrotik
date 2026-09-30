@@ -12,7 +12,20 @@ use Illuminate\Support\Carbon;
 
 /**
  * Evaluates every enabled MikrotikRule that applies to a MikrotikSnapshot's
- * connection, and records a MikrotikAlert for each one that matches.
+ * connection, and maintains each rule's alert lifecycle:
+ *
+ *   - Rule matches, no active ('triggered') alert exists for it yet ->
+ *     a new MikrotikAlert is created with status 'triggered'.
+ *   - Rule matches, an active alert for it already exists -> nothing
+ *     happens (deduplication: repeated matching evaluations do not pile
+ *     up duplicate rows for the same ongoing condition).
+ *   - Rule no longer matches, but an active alert for it exists -> that
+ *     alert is flipped to 'resolved' (with $resolved_at set). It is
+ *     never deleted or rewritten beyond that.
+ *   - Rule matches again after its previous alert was resolved -> since
+ *     there is no longer an active alert for that rule, this is treated
+ *     the same as the first case: a new, separate historical alert row
+ *     is created.
  *
  * A rule's $metric is a dot path into the snapshot: the first segment
  * selects which stored array to read ("resource", "health", or
@@ -27,19 +40,24 @@ use Illuminate\Support\Carbon;
  *
  * A metric that is absent from this particular snapshot (e.g. a sensor
  * this device doesn't expose, or an interface that wasn't present) is
- * silently skipped, not an error -- consistent with how resource()/
- * health()/interfaces() themselves never throw for absent device data.
- * A non-numeric value is likewise skipped: only numeric comparisons are
- * supported.
+ * silently skipped -- not an error, and not treated as "no longer
+ * matches" either: an existing active alert is left untouched rather
+ * than resolved on the strength of missing data. A non-numeric value is
+ * skipped the same way. A disabled rule is not evaluated at all.
  *
  * This class does not run automatically -- nothing in P1-P4 calls it,
  * and it is not wired into a scheduler yet (see the README's Known
- * limitations; that is P6's job).
+ * limitations; that is P6's job). It also does not group a rule's
+ * triggered/resolved cycles into an incident -- each is an independent
+ * historical row.
  */
 final class RuleEvaluator
 {
     /**
-     * @return list<MikrotikAlert> One row per rule that matched, in rule order.
+     * @return list<MikrotikAlert> Newly created ('triggered') alerts only,
+     *   in rule order. A rule whose active alert is resolved during this
+     *   call, or that dedupes against an already-active alert, produces
+     *   no entry here (the change is still persisted, just not returned).
      */
     public function evaluate(MikrotikSnapshot $snapshot): array
     {
@@ -53,22 +71,40 @@ final class RuleEvaluator
             }
 
             $value = (float) $value;
+            $isMatch = $this->matches($value, $rule->operator, $rule->threshold);
 
-            if (!$this->matches($value, $rule->operator, $rule->threshold)) {
+            $activeAlert = MikrotikAlert::query()
+                ->where('rule_id', $rule->id)
+                ->active()
+                ->first();
+
+            if ($isMatch) {
+                if ($activeAlert !== null) {
+                    continue; // already active -- deduplicated, not a new row
+                }
+
+                $alerts[] = MikrotikAlert::query()->create([
+                    'rule_id'      => $rule->id,
+                    'snapshot_id'  => $snapshot->id,
+                    'connection'   => $snapshot->connection,
+                    'metric'       => $rule->metric,
+                    'operator'     => $rule->operator,
+                    'threshold'    => $rule->threshold,
+                    'value'        => $value,
+                    'status'       => MikrotikAlert::STATUS_TRIGGERED,
+                    'message'      => $rule->name,
+                    'triggered_at' => Carbon::now(),
+                ]);
+
                 continue;
             }
 
-            $alerts[] = MikrotikAlert::query()->create([
-                'rule_id'      => $rule->id,
-                'snapshot_id'  => $snapshot->id,
-                'connection'   => $snapshot->connection,
-                'metric'       => $rule->metric,
-                'operator'     => $rule->operator,
-                'threshold'    => $rule->threshold,
-                'value'        => $value,
-                'message'      => $rule->name,
-                'triggered_at' => Carbon::now(),
-            ]);
+            if ($activeAlert !== null) {
+                $activeAlert->update([
+                    'status'      => MikrotikAlert::STATUS_RESOLVED,
+                    'resolved_at' => Carbon::now(),
+                ]);
+            }
         }
 
         return $alerts;
