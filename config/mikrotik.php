@@ -32,6 +32,12 @@ return [
     | router using a self-signed certificate you have not imported into
     | a trusted CA store, and only if you understand the risk.
     |
+    | retry (P9, opt-in) is 0 attempts by default — identical to every
+    | version of this package before P9. Set 'times' above 0 to retry a
+    | request; only a transient connection failure or a RouterOS-side 5xx
+    | response is retried, never an authentication rejection or any other
+    | 4xx. 'sleep' is the delay between attempts, in milliseconds.
+    |
     */
 
     'connections' => [
@@ -44,6 +50,10 @@ return [
             'password'    => env('MIKROTIK_PASSWORD', ''),
             'verify_tls'  => env('MIKROTIK_VERIFY_TLS', true),
             'timeout'     => env('MIKROTIK_TIMEOUT', 10),
+            'retry' => [
+                'times' => env('MIKROTIK_RETRY_TIMES', 0),
+                'sleep' => env('MIKROTIK_RETRY_SLEEP', 0),
+            ],
         ],
 
     ],

@@ -2,17 +2,19 @@
 
 A Laravel abstraction for MikroTik RouterOS devices.
 
-**This is P1 through P8 — an intentionally small, incrementally-grown
+**This is P1 through P9 — an intentionally small, incrementally-grown
 release.** It provides connection management and read-only retrieval of
 router resource info, hardware health, interfaces (with cumulative
 traffic counters and a one-shot rate reading), log entries, opt-in
 database persistence of point-in-time monitoring snapshots, opt-in
 threshold rules with a triggered/resolved alert lifecycle, a
 Laravel-scheduler-friendly `mikrotik:monitor` command, optional mail/
-webhook alert notifications, and read-only history/trend analytics over
-already-recorded data — all over the RouterOS REST API. Everything else —
-DHCP/PPP/firewall/VPN, a binary-API transport, router CRUD/management,
-incident grouping, and AI-powered diagnosis
+webhook alert notifications, read-only history/trend analytics over
+already-recorded data, generic read-only RouterOS REST menu access for
+any menu this package doesn't have a named method for, and opt-in HTTP
+retry — all over the RouterOS REST API. Everything else — DHCP/PPP/
+firewall/VPN, any write/configuration operation, a binary-API transport,
+router CRUD/management, incident grouping, and AI-powered diagnosis
 (`easybdit/laravel-mikrotik-ai`, a separate future package) — is **not
 implemented yet**. See [Known limitations](#known-limitations) below for
 the authoritative list.
@@ -202,6 +204,86 @@ Filtering only supports simple equality (RouterOS REST's documented
 `?field=value` query-string form). RouterOS's console-only `~`
 (contains/regex) filter operator is not supported over REST filtering in
 this phase.
+
+### Generic menu access (P9)
+
+`resource()`, `health()`, `interfaces()`, `interfaceRate()`, and `logs()`
+are named, typed methods for five specific RouterOS menus. For anything
+else, `menu()` gives generic read-only access to any RouterOS REST menu,
+without waiting for this package to add a named method for it:
+
+```php
+$addresses = $router->menu('ip/address')->get();
+
+foreach ($addresses as $address) {
+    echo "{$address['address']} on {$address['interface']}\n";
+}
+
+// Simple equality filtering -- the same `?field=value` form logs() uses:
+$onBridge1 = $router->menu('ip/address')->get(['interface' => 'bridge1']);
+
+// A single item by its RouterOS ".id" (e.g. "*1") or, where the menu
+// supports it, its name (e.g. "ether1"):
+$item = $router->menu('interface')->find('ether1');
+```
+
+`get()` returns an `Illuminate\Support\Collection` of **raw, untyped
+associative arrays** — exactly RouterOS's REST JSON as-is (every value
+still a JSON-encoded string, per RouterOS REST's own convention). Unlike
+the five named methods above, `menu()` has no fixed schema to safely
+guess field types from for an arbitrary menu, so it never attempts to —
+normalize whatever fields you need yourself.
+
+`find()` does **not** convert a "not found" condition to `null`.
+RouterOS's documented error shape for a `DELETE` on an unknown identifier
+is confirmed (`{"error":404,"message":"Not Found"}`), but the equivalent
+for a `GET` was not independently confirmed against a live device, so
+this deliberately does not guess which failure to swallow — any error,
+including "not found", surfaces as the same `RouterOsException` (or
+`AuthenticationException`/`ConnectionException`, as appropriate) every
+other RouterOS-side failure already does.
+
+`menu()` only ever issues a `GET` (RouterOS's documented `print`) —
+**there is no `add()`/`set()`/`remove()`/`enable()`/`disable()` in this
+phase**, and every menu path and item identifier is validated against a
+strict allow-list before use, so a caller cannot escape the `/rest/` API
+root, inject a scheme/host, or attempt a path-traversal segment (`..`) —
+an invalid one throws `InvalidMenuPathException` immediately rather than
+being sent to the router at all.
+
+*A brief note on positioning: generic read-only RouterOS REST menu
+access is provided without requiring callers to use a menu-specific DTO
+— useful once you need a menu this package hasn't named yet, while the
+five typed methods above remain the richer, safer choice for what they
+already cover.*
+
+### Retry (opt-in, P9)
+
+Every connection can opt into retrying a request that failed for a
+transient reason:
+
+```php
+'connections' => [
+    'default' => [
+        // ...
+        'retry' => [
+            'times' => 3,   // 0 (default) = no retry, identical to every version of this package before P9
+            'sleep' => 500, // milliseconds between attempts
+        ],
+    ],
+],
+```
+
+Only a transient connection failure (timeout/DNS/refused) or a
+RouterOS-side `5xx` response is retried — **never** a `401`/`403`
+(`AuthenticationException`) or any other `4xx` (a RouterOS-side
+rejection, e.g. a bad query, which retrying would not change). This is
+safe to enable for every method in this package: P9 added no write
+operation, and the one existing `POST` use
+(`interfaceRate()`'s `monitor-traffic ... once`) is idempotent. Retry is
+per connection, uses Laravel's own `Http` client retry mechanism (no
+second retry/locking system was built for this), and does not change
+`timeout` behavior.
 
 ### Monitoring snapshots (opt-in persistence)
 
@@ -486,6 +568,20 @@ try {
   Both channels are disabled by default.
 - P8's `MonitoringAnalytics` is read-only: it makes no RouterOS request
   and does not write to any table.
+- P9's `menu()` validates every menu path and item identifier against a
+  strict allow-list (letters/digits/`_`/`-`/`/` for paths; adds `.`/`*`
+  for identifiers) before ever building a request — a path traversal
+  (`..`), an absolute URL, or protocol-like input (`http://...`) is
+  rejected with `InvalidMenuPathException` and never reaches the
+  transport layer at all.
+- `menu()` results are raw RouterOS REST data (the same fields
+  `resource()`/`health()`/`interfaces()` etc. already receive) — never
+  connection credentials, and never logged.
+- P9's retry never retries a `401`/`403`, so enabling it cannot turn a
+  single rejected-credentials attempt into repeated ones, and it adds no
+  new place where the `Authorization` header could be logged/echoed —
+  the same request-building code path (and the same never-log-a-request
+  rule) is reused for every attempt.
 
 ## Testing
 
@@ -532,8 +628,22 @@ This package intentionally does **not** include:
 - Notification channels beyond mail/webhook (no Slack, SMS, etc.), and
   no queueing of notification delivery (P7 is synchronous by design)
 - Any way to change RouterOS's own configuration — every phase through
-  P8 is strictly read-only plus this package's own database records
-  (no router CRUD/management yet)
+  P9 is strictly read-only plus this package's own database records (no
+  router CRUD/management yet, and `menu()` (P9) is GET-only — no
+  `add()`/`set()`/`remove()`/`enable()`/`disable()`)
+- Filtering beyond simple equality on `menu()->get()` — no RouterOS
+  `.query`/`~`/operator-based filtering or `POST`-based filtering, only
+  the same `?field=value` form `logs()` already uses (see
+  [Generic menu access](#generic-menu-access-p9)); not implemented until
+  independently verified
+- A confirmed not-found behavior for `menu()->find()` — it currently
+  surfaces RouterOS's generic error response (`RouterOsException`)
+  rather than returning `null`, because the exact `GET`-by-id "not
+  found" error shape was not independently confirmed against a live
+  device (see [Generic menu access](#generic-menu-access-p9))
+- Concurrent/batched RouterOS requests (e.g. the binary API's
+  tag-correlated multiplexing over one socket) — REST is one request per
+  response; nothing in this package sends multiple requests at once
 - A binary RouterOS API transport (port 8728/8729) — REST only
 - Any AI integration (`easybdit/laravel-mikrotik-ai` is a separate,
   not-yet-built package; this package has no dependency on
@@ -551,6 +661,11 @@ development) and are expected to work with the same RouterOS user
 independently re-confirmed for `/interface` or `/log` specifically —
 if your RouterOS user has a restricted policy set, verify read access to
 these menus against your own device.
+
+`menu()` (P9) is a generic accessor: whatever RouterOS "read" policy
+your user needs for a given menu is entirely between your RouterOS user
+configuration and that menu — this package cannot verify permissions
+per menu on your behalf.
 
 ## License
 

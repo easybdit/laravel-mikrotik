@@ -10,6 +10,7 @@ use Easybdit\LaravelMikrotik\Exceptions\ConnectionException as MikrotikConnectio
 use Easybdit\LaravelMikrotik\Exceptions\MalformedResponseException;
 use Easybdit\LaravelMikrotik\Exceptions\RouterOsException;
 use Illuminate\Http\Client\ConnectionException as HttpConnectionException;
+use Illuminate\Http\Client\RequestException as HttpRequestException;
 use Illuminate\Support\Facades\Http;
 
 /**
@@ -40,6 +41,18 @@ use Illuminate\Support\Facades\Http;
  * argument GET's query string can't express. The same documentation
  * states there is no way to run a continuous/streaming console command
  * (e.g. "monitor") over REST at all; this class does not attempt to.
+ *
+ * Retry (P9, opt-in): $retryTimes defaults to 0 (no retry at all —
+ * identical to every version of this class before P9). When set above
+ * 0, a request is retried only for a transient connection failure
+ * (timeout/DNS/refused — the same condition ConnectionException::
+ * timedOut()/unreachable() already represent) or a RouterOS-side 5xx
+ * response; never for a 401/403 (AuthenticationException) or any other
+ * 4xx (a RouterOS-side rejection like a bad query, not a transient
+ * fault) — retrying those would not change the outcome and would risk
+ * hammering credentials that are simply wrong. Retrying is otherwise
+ * always safe here: P9 added no write operations, and GET/this class's
+ * one documented POST use (monitor-traffic "once") are both idempotent.
  */
 class RestTransport implements Transport
 {
@@ -50,6 +63,8 @@ class RestTransport implements Transport
         private readonly string $password,
         private readonly bool $verifyTls = true,
         private readonly int $timeoutSeconds = 10,
+        private readonly int $retryTimes = 0,
+        private readonly int $retrySleepMilliseconds = 0,
     ) {
     }
 
@@ -69,10 +84,33 @@ class RestTransport implements Transport
 
     private function client(): \Illuminate\Http\Client\PendingRequest
     {
-        return Http::withBasicAuth($this->username, $this->password)
+        $client = Http::withBasicAuth($this->username, $this->password)
             ->withOptions(['verify' => $this->verifyTls])
             ->timeout($this->timeoutSeconds)
             ->acceptJson();
+
+        if ($this->retryTimes > 0) {
+            // throw:false is deliberate -- retry() must still hand back a
+            // plain (possibly still-failing) Response after retries are
+            // exhausted, so send()'s existing status-code handling below
+            // decides the final outcome exactly as it already does today;
+            // this only adds retry attempts in front of that, unchanged
+            // logic.
+            $client = $client->retry(
+                $this->retryTimes,
+                $this->retrySleepMilliseconds,
+                function (\Throwable $exception): bool {
+                    if ($exception instanceof HttpConnectionException) {
+                        return true;
+                    }
+
+                    return $exception instanceof HttpRequestException && $exception->response->status() >= 500;
+                },
+                throw: false,
+            );
+        }
+
+        return $client;
     }
 
     private function url(string $path): string

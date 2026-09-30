@@ -2,6 +2,37 @@
 
 All notable changes to `easybdit/laravel-mikrotik` are documented here.
 
+## P9 — Generic read-only menu access + opt-in retry
+
+- Added `RouterConnection::menu(string $path): Connection\Menu`: generic,
+  read-only access to any RouterOS REST menu this package does not have
+  a named/typed method for, e.g. `$router->menu('ip/address')->get()`.
+  Reuses `Transport::get()` exactly as every named method already does —
+  no new HTTP verb, no write operation (`add()`/`set()`/`remove()`/
+  `enable()`/`disable()` are explicitly out of scope for this phase).
+  `get()` returns an `Illuminate\Support\Collection` of raw, untyped
+  associative arrays (no schema/type guessing for an arbitrary menu);
+  `find(string $id)` fetches a single item by `.id` or name.
+- Added `Exceptions\InvalidMenuPathException`: every menu path and item
+  identifier passed to `menu()`/`find()` is validated against a strict
+  allow-list before being used, rejecting path traversal (`..`),
+  absolute-URL/protocol-like input, and any character outside what a
+  RouterOS menu path or identifier can legitimately contain.
+- `find()` deliberately does not convert a "not found" condition to
+  `null` — RouterOS's documented error shape for a `GET`-by-id targeting
+  an unknown identifier was not independently confirmed (only the
+  equivalent for `DELETE` is, per official documentation), so any
+  failure surfaces as the existing `RouterOsException`/
+  `AuthenticationException`/`ConnectionException` hierarchy unchanged.
+- Added opt-in per-connection HTTP retry (`config('mikrotik.connections.
+  <name>.retry')`, keys `times`/`sleep`), using Laravel's own `Http`
+  client retry mechanism. Defaults to `times: 0` — identical to every
+  version of this package before P9. Retries only a transient connection
+  failure or a RouterOS-side `5xx`; never a `401`/`403` or any other
+  `4xx`.
+- No changes to any P1-P8 public API, database schema, or default
+  behavior; this phase is entirely additive.
+
 ## P8 — Monitoring analytics
 
 - Added `Easybdit\LaravelMikrotik\Monitoring\MonitoringAnalytics`:

@@ -95,4 +95,19 @@ final class RouterConnection
     {
         return $this->normalizer->normalizeLogs($this->transport->get('/log', $filter));
     }
+
+    /**
+     * Generic, read-only access to any RouterOS REST menu this package
+     * does not (or does not yet) expose a named/typed method for, e.g.
+     * `$router->menu('ip/address')->get()`. See Menu's own docblock for
+     * exactly what it does and does not do — in short: GET-only, no
+     * write operations, raw untyped rows, no change to any other method
+     * on this class.
+     *
+     * @throws \Easybdit\LaravelMikrotik\Exceptions\InvalidMenuPathException $path is not a plain, safe RouterOS menu path.
+     */
+    public function menu(string $path): Menu
+    {
+        return new Menu($this->transport, $path);
+    }
 }

@@ -66,6 +66,8 @@ final class ConnectionManager
             }
         }
 
+        $retry = is_array($config['retry'] ?? null) ? $config['retry'] : [];
+
         $transport = new RestTransport(
             host: (string) $config['host'],
             port: (int) ($config['port'] ?? 443),
@@ -73,6 +75,8 @@ final class ConnectionManager
             password: (string) $config['password'],
             verifyTls: (bool) ($config['verify_tls'] ?? true),
             timeoutSeconds: (int) ($config['timeout'] ?? 10),
+            retryTimes: (int) ($retry['times'] ?? 0),
+            retrySleepMilliseconds: (int) ($retry['sleep'] ?? 0),
         );
 
         return new RouterConnection($name, $transport, new ResponseNormalizer());
