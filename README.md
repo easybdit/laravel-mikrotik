@@ -2,13 +2,14 @@
 
 A Laravel abstraction for MikroTik RouterOS devices.
 
-**This is P1 + P2 + P3 + P4 — an intentionally small, incrementally-grown
-release.** It provides connection management and read-only retrieval of
-router resource info, hardware health, interfaces (with cumulative
-traffic counters and a one-shot rate reading), log entries, and
-opt-in database persistence of point-in-time monitoring snapshots, all
-over the RouterOS REST API. Everything else — DHCP/PPP/firewall/VPN,
-scheduled polling, rules/alerting, a binary-API transport, and
+**This is P1 + P2 + P3 + P4 + P5 — an intentionally small,
+incrementally-grown release.** It provides connection management and
+read-only retrieval of router resource info, hardware health, interfaces
+(with cumulative traffic counters and a one-shot rate reading), log
+entries, opt-in database persistence of point-in-time monitoring
+snapshots, and opt-in threshold rules that record an alert when a
+snapshot crosses them, all over the RouterOS REST API. Everything else —
+DHCP/PPP/firewall/VPN, scheduled polling, a binary-API transport, and
 AI-powered diagnosis (`easybdit/laravel-mikrotik-ai`, a separate future
 package) — is **not implemented yet**. See
 [Known limitations](#known-limitations) below for the authoritative list.
@@ -252,6 +253,63 @@ automatic/recurring snapshot capture — see
 [Known limitations](#known-limitations). Calling `record()` is entirely
 up to your application (e.g. from your own scheduled command).
 
+### Rules and alerts (opt-in, built on snapshots)
+
+P5 adds opt-in threshold rules, evaluated against a `MikrotikSnapshot`
+(see above — this depends on P4). A rule is a plain Eloquent row you
+create yourself; there is no config-file or artisan-command way to
+define one in this phase.
+
+```php
+use Easybdit\LaravelMikrotik\Models\MikrotikRule;
+
+MikrotikRule::query()->create([
+    'connection' => 'branch-01', // or null to apply to every connection
+    'name'       => 'High CPU load',
+    'metric'     => 'resource.cpu_load',
+    'operator'   => '>',           // one of: > >= < <= == !=
+    'threshold'  => 90,
+]);
+```
+
+`metric` is a dot path into the snapshot's stored data: the first
+segment must be `resource`, `health`, or `interfaces` (matching
+`MikrotikSnapshot`'s three columns), and the rest is resolved with
+`Illuminate\Support\Arr::get()`, e.g. `health.cpu-temperature.value` or
+`interfaces.ether1.rx_error`. An unsupported `operator` or a `metric`
+that doesn't start with one of those three prefixes throws
+`InvalidRuleException` immediately when the rule is saved, not later
+when it happens to be evaluated.
+
+Evaluate a snapshot against every enabled rule that applies to its
+connection (a rule with `connection` left `null` applies to all of
+them):
+
+```php
+use Easybdit\LaravelMikrotik\Monitoring\RuleEvaluator;
+
+$snapshot = app(\Easybdit\LaravelMikrotik\Monitoring\SnapshotRecorder::class)->record('branch-01');
+
+$alerts = app(RuleEvaluator::class)->evaluate($snapshot);
+
+foreach ($alerts as $alert) {
+    echo "{$alert->metric} {$alert->operator} {$alert->threshold} (was {$alert->value})\n";
+}
+```
+
+A metric absent from a given snapshot (a sensor this device doesn't
+expose, an interface that wasn't present) is silently skipped, the same
+way `resource()`/`health()`/`interfaces()` never throw for absent device
+data — it is not treated as a rule match.
+
+Each `MikrotikAlert` is an **immutable historical record** of one rule
+matching one snapshot — not a stateful "active/resolved" alert, and
+repeated firings are not deduplicated or grouped into an incident in
+this phase (see [Known limitations](#known-limitations); that is P10's
+job). Nothing calls `RuleEvaluator::evaluate()` automatically — there is
+no scheduler or artisan command yet (P6), and no framework event is
+dispatched when an alert is recorded yet (P7).
+
 ### Why `health()` doesn't return a fixed object
 
 MikroTik hardware exposes different sensors per board — confirmed
@@ -299,6 +357,10 @@ try {
   (board info, sensor readings, interface state/counters) — never
   connection credentials. It lives in your own application's database,
   so your normal database access controls apply to it.
+- P5's `mikrotik_rules` and `mikrotik_alerts` tables are the same: rule
+  definitions and alert history you (or your application code) create,
+  derived entirely from data `mikrotik_snapshots` already stores. Neither
+  table stores or references connection credentials.
 - No exception message this package throws ever includes the configured
   username or password — verified directly by the test suite (see
   `tests/Feature/SecurityTest.php`).
@@ -339,9 +401,18 @@ This package intentionally does **not** include:
   buffer size
 - DHCP, PPP/PPPoE, firewall, or VPN modules
 - Scheduled/recurring polling of any kind — `SnapshotRecorder::record()`
-  (P4) captures one snapshot per call; nothing in this package invokes it
-  on a schedule (no artisan command, no console kernel entry)
-- Rules, thresholds, or alerting on recorded snapshot data
+  (P4) captures one snapshot per call, and `RuleEvaluator::evaluate()`
+  (P5) evaluates one snapshot per call; nothing in this package invokes
+  either on a schedule (no artisan command, no console kernel entry)
+- Any config-file or artisan-command way to define a `MikrotikRule` —
+  create one directly via Eloquent (P5)
+- Alert lifecycle/state — a `MikrotikAlert` (P5) is an immutable
+  historical record of one rule matching one snapshot; there is no
+  active/resolved status, no de-duplication of repeated firings, and no
+  grouping of related alerts into an incident
+- Any framework event dispatched when a snapshot is recorded or an alert
+  fires — `SnapshotRecorder`/`RuleEvaluator` return the created row(s)
+  directly; nothing is broadcast via Laravel's event system yet
 - A binary RouterOS API transport (port 8728/8729) — REST only
 - Any AI integration (`easybdit/laravel-mikrotik-ai` is a separate,
   not-yet-built package; this package has no dependency on
