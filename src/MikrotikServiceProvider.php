@@ -6,6 +6,7 @@ namespace Easybdit\LaravelMikrotik;
 
 use Easybdit\LaravelMikrotik\Connection\ConnectionManager;
 use Easybdit\LaravelMikrotik\Console\Commands\MonitorCommand;
+use Easybdit\LaravelMikrotik\Monitoring\AlertNotifier;
 use Easybdit\LaravelMikrotik\Monitoring\RuleEvaluator;
 use Easybdit\LaravelMikrotik\Monitoring\SnapshotRecorder;
 use Illuminate\Support\ServiceProvider;
@@ -28,6 +29,10 @@ class MikrotikServiceProvider extends ServiceProvider
 
         $this->app->singleton(RuleEvaluator::class, function () {
             return new RuleEvaluator();
+        });
+
+        $this->app->singleton(AlertNotifier::class, function ($app) {
+            return new AlertNotifier($app->make('config'));
         });
     }
 
@@ -56,6 +61,6 @@ class MikrotikServiceProvider extends ServiceProvider
 
     public function provides(): array
     {
-        return ['mikrotik', ConnectionManager::class, SnapshotRecorder::class, RuleEvaluator::class];
+        return ['mikrotik', ConnectionManager::class, SnapshotRecorder::class, RuleEvaluator::class, AlertNotifier::class];
     }
 }

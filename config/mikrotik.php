@@ -48,4 +48,32 @@ return [
 
     ],
 
+    /*
+    |--------------------------------------------------------------------------
+    | Notifications
+    |--------------------------------------------------------------------------
+    |
+    | Optional delivery of P5 alert (triggered/resolved) notifications via
+    | Monitoring\AlertNotifier. Both channels are disabled by default: an
+    | application that sets neither *_ENABLED variable is unaffected, and
+    | AlertNotifier::notify() is a silent no-op with nothing configured.
+    |
+    | 'mail.to' accepts a single address or a comma-separated list.
+    |
+    */
+
+    'notifications' => [
+
+        'mail' => [
+            'enabled' => env('MIKROTIK_NOTIFY_MAIL_ENABLED', false),
+            'to'      => env('MIKROTIK_NOTIFY_MAIL_TO'),
+        ],
+
+        'webhook' => [
+            'enabled' => env('MIKROTIK_NOTIFY_WEBHOOK_ENABLED', false),
+            'url'     => env('MIKROTIK_NOTIFY_WEBHOOK_URL'),
+        ],
+
+    ],
+
 ];

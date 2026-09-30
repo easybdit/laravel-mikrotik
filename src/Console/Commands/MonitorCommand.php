@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace Easybdit\LaravelMikrotik\Console\Commands;
 
 use Easybdit\LaravelMikrotik\Exceptions\MikrotikException;
+use Easybdit\LaravelMikrotik\Models\MikrotikAlert;
+use Easybdit\LaravelMikrotik\Monitoring\AlertNotifier;
 use Easybdit\LaravelMikrotik\Monitoring\RuleEvaluator;
 use Easybdit\LaravelMikrotik\Monitoring\SnapshotRecorder;
 use Illuminate\Console\Command;
@@ -30,6 +32,12 @@ use Illuminate\Contracts\Config\Repository as ConfigRepository;
  * being processed. This is what makes repeated/scheduled execution safe
  * -- one bad router does not take the whole run down, and each run is
  * independent of the last (no state is carried between invocations).
+ *
+ * After evaluating, this command also delivers P7's optional
+ * notifications (AlertNotifier) for every alert that newly became
+ * 'triggered' or 'resolved' during this run -- a no-op unless the host
+ * application has configured a mail/webhook route (see
+ * config('mikrotik.notifications')).
  */
 class MonitorCommand extends Command
 {
@@ -38,8 +46,12 @@ class MonitorCommand extends Command
 
     protected $description = 'Record a MikroTik monitoring snapshot and evaluate alert rules against it';
 
-    public function handle(SnapshotRecorder $recorder, RuleEvaluator $evaluator, ConfigRepository $config): int
-    {
+    public function handle(
+        SnapshotRecorder $recorder,
+        RuleEvaluator $evaluator,
+        AlertNotifier $notifier,
+        ConfigRepository $config
+    ): int {
         /** @var list<string> $requested */
         $requested = (array) $this->option('connection');
         $names = $requested !== [] ? $requested : array_keys((array) $config->get('mikrotik.connections', []));
@@ -54,11 +66,24 @@ class MonitorCommand extends Command
 
         foreach ($names as $name) {
             try {
+                $activeIdsBefore = MikrotikAlert::query()->forConnection($name)->active()->pluck('id');
+
                 $snapshot = $recorder->record($name);
-                $alerts = $evaluator->evaluate($snapshot);
+                $triggered = $evaluator->evaluate($snapshot);
+
+                $justResolved = MikrotikAlert::query()
+                    ->whereIn('id', $activeIdsBefore->diff(
+                        MikrotikAlert::query()->forConnection($name)->active()->pluck('id')
+                    ))
+                    ->get();
+
+                foreach ([...$triggered, ...$justResolved->all()] as $alert) {
+                    $notifier->notify($alert);
+                }
 
                 $this->components->info(
-                    "[{$name}] snapshot #{$snapshot->id} recorded, " . count($alerts) . ' alert(s) triggered.'
+                    "[{$name}] snapshot #{$snapshot->id} recorded, " . count($triggered) . ' triggered, '
+                        . $justResolved->count() . ' resolved.'
                 );
                 $succeeded++;
             } catch (MikrotikException $e) {
