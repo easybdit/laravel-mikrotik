@@ -2,17 +2,20 @@
 
 A Laravel abstraction for MikroTik RouterOS devices.
 
-**This is P1 + P2 + P3 + P4 + P5 — an intentionally small,
-incrementally-grown release.** It provides connection management and
-read-only retrieval of router resource info, hardware health, interfaces
-(with cumulative traffic counters and a one-shot rate reading), log
-entries, opt-in database persistence of point-in-time monitoring
-snapshots, and opt-in threshold rules that record an alert when a
-snapshot crosses them, all over the RouterOS REST API. Everything else —
-DHCP/PPP/firewall/VPN, scheduled polling, a binary-API transport, and
-AI-powered diagnosis (`easybdit/laravel-mikrotik-ai`, a separate future
-package) — is **not implemented yet**. See
-[Known limitations](#known-limitations) below for the authoritative list.
+**This is P1 through P8 — an intentionally small, incrementally-grown
+release.** It provides connection management and read-only retrieval of
+router resource info, hardware health, interfaces (with cumulative
+traffic counters and a one-shot rate reading), log entries, opt-in
+database persistence of point-in-time monitoring snapshots, opt-in
+threshold rules with a triggered/resolved alert lifecycle, a
+Laravel-scheduler-friendly `mikrotik:monitor` command, optional mail/
+webhook alert notifications, and read-only history/trend analytics over
+already-recorded data — all over the RouterOS REST API. Everything else —
+DHCP/PPP/firewall/VPN, a binary-API transport, router CRUD/management,
+incident grouping, and AI-powered diagnosis
+(`easybdit/laravel-mikrotik-ai`, a separate future package) — is **not
+implemented yet**. See [Known limitations](#known-limitations) below for
+the authoritative list.
 
 ## Requirements
 
@@ -300,15 +303,119 @@ foreach ($alerts as $alert) {
 A metric absent from a given snapshot (a sensor this device doesn't
 expose, an interface that wasn't present) is silently skipped, the same
 way `resource()`/`health()`/`interfaces()` never throw for absent device
-data — it is not treated as a rule match.
+data — it is not treated as a rule match, and does **not** resolve an
+existing active alert (see lifecycle below).
 
-Each `MikrotikAlert` is an **immutable historical record** of one rule
-matching one snapshot — not a stateful "active/resolved" alert, and
-repeated firings are not deduplicated or grouped into an incident in
-this phase (see [Known limitations](#known-limitations); that is P10's
-job). Nothing calls `RuleEvaluator::evaluate()` automatically — there is
-no scheduler or artisan command yet (P6), and no framework event is
-dispatched when an alert is recorded yet (P7).
+Each `MikrotikAlert` carries a simple two-state lifecycle, tracked in
+`status` (`'triggered'` or `'resolved'`) and `resolved_at`:
+
+- A rule matches and has no active alert yet → a new alert is created
+  with `status = 'triggered'`.
+- A rule matches again while its alert is still active → **no duplicate
+  row** is created (deduplication).
+- A rule stops matching while it has an active alert → that alert is
+  flipped to `status = 'resolved'`, `resolved_at` set — never deleted.
+- The same rule matches again afterwards → since no active alert
+  remains, a **new, separate** historical alert row is created.
+
+`RuleEvaluator::evaluate()` only returns newly-created (`'triggered'`)
+alerts; a resolution or a deduplicated repeat produces no entry in the
+returned array, though the underlying row is still updated/left as-is.
+History is never deleted — query `MikrotikAlert::query()->resolved()` /
+`->active()` for either state. This phase does **not** group a rule's
+triggered/resolved cycles into an incident (see
+[Known limitations](#known-limitations); that is P10's job).
+
+### Scheduled monitoring (`mikrotik:monitor`, P6)
+
+P6 adds an artisan command that ties P4 and P5 together: for one or more
+connections, it records a snapshot (`SnapshotRecorder`) and evaluates it
+(`RuleEvaluator`) in one step.
+
+```bash
+php artisan mikrotik:monitor                          # every configured connection
+php artisan mikrotik:monitor --connection=branch-01    # a specific one (repeatable)
+```
+
+This package does **not** register its own schedule entry — put it on
+Laravel's own scheduler, in your application's `routes/console.php`:
+
+```php
+use Illuminate\Support\Facades\Schedule;
+
+Schedule::command('mikrotik:monitor')->everyFiveMinutes()->withoutOverlapping();
+```
+
+`->withoutOverlapping()` is Laravel's own cache-based lock; this package
+deliberately does not build a second one. Each connection is handled
+independently inside the command: a failure capturing one (unreachable
+router, rejected credentials, a RouterOS-side error) is reported via a
+console error line and does not stop the others, and each run is
+independent of the last (no state carried between invocations) — which
+is what makes running it repeatedly/on a schedule safe. The command
+exits successfully if at least one connection succeeded.
+
+### Notifications (opt-in, P7)
+
+P7 adds optional mail/webhook delivery when `mikrotik:monitor` (P6)
+observes an alert newly become `'triggered'` or `'resolved'`. Both
+channels are disabled by default — set the relevant `MIKROTIK_NOTIFY_*`
+variables to enable one or both:
+
+```env
+MIKROTIK_NOTIFY_MAIL_ENABLED=true
+MIKROTIK_NOTIFY_MAIL_TO=ops@example.com
+
+MIKROTIK_NOTIFY_WEBHOOK_ENABLED=true
+MIKROTIK_NOTIFY_WEBHOOK_URL=https://example.com/hooks/mikrotik
+```
+
+With neither variable set, `Monitoring\AlertNotifier::notify()` is a
+silent no-op — Laravel's `Notification` facade is never touched. You can
+also call it directly for your own alerts:
+
+```php
+use Easybdit\LaravelMikrotik\Monitoring\AlertNotifier;
+
+app(AlertNotifier::class)->notify($alert); // $alert: MikrotikAlert
+```
+
+Delivery uses Laravel's own on-demand/anonymous notifiable
+(`Notification::route(...)`) rather than a host application's `User`
+model — this package has no concept of a "user" to notify. The webhook
+channel POSTs a JSON payload (`id`, `status`, `connection`, `metric`,
+`operator`, `threshold`, `value`, `message`, `triggered_at`,
+`resolved_at`) to the configured URL. Delivery is synchronous (no
+queueing) — queue it yourself if you need that.
+
+### Monitoring analytics (P8)
+
+P8 adds read-only history/trend queries over data P4 and P5 already
+store — it makes **no RouterOS requests of its own** and does not change
+`mikrotik_snapshots`/`mikrotik_alerts` in any way.
+
+```php
+use Easybdit\LaravelMikrotik\Monitoring\MonitoringAnalytics;
+
+$analytics = app(MonitoringAnalytics::class);
+
+$analytics->resourceTrend('branch-01', 'cpu_load', since: now()->subDay());
+$analytics->healthTrend('branch-01', 'cpu-temperature');
+$analytics->interfaceCounterTrend('branch-01', 'ether1', 'rx_error'); // also covers tx_error/rx_drop/tx_drop
+$analytics->interfaceRateHistory('branch-01', 'ether1', 'rx_byte');
+$analytics->alertHistory('branch-01');
+$analytics->alertCountsByRuleMetric('branch-01');
+```
+
+`interfaceRateHistory()` computes a per-second rate between each pair of
+consecutive stored snapshots from their already-recorded cumulative
+counters — contrast `RouterConnection::interfaceRate()` (P3), which is
+RouterOS's own live one-shot reading at the moment of the call. A pair
+where the counter decreased (RouterOS resets these on interface reset —
+typically a reboot) is reported as `rate_per_second: null, counter_reset:
+true` rather than a misleading negative number. Every query here filters
+first on the `connection` + `captured_at`/`triggered_at` columns already
+indexed by the P4/P5 migrations before touching a row's JSON columns.
 
 ### Why `health()` doesn't return a fixed object
 
@@ -372,6 +479,13 @@ try {
   `getPrevious()`.
 - The package never logs a request it makes, and in particular never
   logs the `Authorization` header.
+- P7's `config('mikrotik.notifications')` (mail/webhook) holds only a
+  destination address/URL, never router credentials — the webhook
+  payload (see [Notifications](#notifications-opt-in-p7)) carries the
+  same alert fields `mikrotik_alerts` already stores and nothing else.
+  Both channels are disabled by default.
+- P8's `MonitoringAnalytics` is read-only: it makes no RouterOS request
+  and does not write to any table.
 
 ## Testing
 
@@ -400,19 +514,26 @@ This package intentionally does **not** include:
   (contains/regex) filtering, no pagination beyond RouterOS's own log
   buffer size
 - DHCP, PPP/PPPoE, firewall, or VPN modules
-- Scheduled/recurring polling of any kind — `SnapshotRecorder::record()`
-  (P4) captures one snapshot per call, and `RuleEvaluator::evaluate()`
-  (P5) evaluates one snapshot per call; nothing in this package invokes
-  either on a schedule (no artisan command, no console kernel entry)
+- A built-in schedule entry or locking — `mikrotik:monitor` (P6) is a
+  plain artisan command; you register it (and `->withoutOverlapping()`)
+  on Laravel's own scheduler yourself (see
+  [Scheduled monitoring](#scheduled-monitoring-mikrotikmonitor-p6))
 - Any config-file or artisan-command way to define a `MikrotikRule` —
   create one directly via Eloquent (P5)
-- Alert lifecycle/state — a `MikrotikAlert` (P5) is an immutable
-  historical record of one rule matching one snapshot; there is no
-  active/resolved status, no de-duplication of repeated firings, and no
-  grouping of related alerts into an incident
-- Any framework event dispatched when a snapshot is recorded or an alert
-  fires — `SnapshotRecorder`/`RuleEvaluator` return the created row(s)
-  directly; nothing is broadcast via Laravel's event system yet
+- Grouping of a `MikrotikAlert` (P5)'s triggered/resolved cycles into an
+  incident — each cycle is an independent historical row; triggered/
+  resolved status and deduplication of an already-active alert are
+  supported (see [Rules and alerts](#rules-and-alerts-opt-in-built-on-snapshots))
+- Any framework event (Laravel event/listener) dispatched when a
+  snapshot is recorded or an alert fires — P7 added mail/webhook
+  *notifications* specifically (see
+  [Notifications](#notifications-opt-in-p7)), but there is no general
+  `Illuminate\Events` hook yet
+- Notification channels beyond mail/webhook (no Slack, SMS, etc.), and
+  no queueing of notification delivery (P7 is synchronous by design)
+- Any way to change RouterOS's own configuration — every phase through
+  P8 is strictly read-only plus this package's own database records
+  (no router CRUD/management yet)
 - A binary RouterOS API transport (port 8728/8729) — REST only
 - Any AI integration (`easybdit/laravel-mikrotik-ai` is a separate,
   not-yet-built package; this package has no dependency on
