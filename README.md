@@ -1,59 +1,122 @@
 # easybdit/laravel-mikrotik
 
-A Laravel abstraction for MikroTik RouterOS devices.
+A Laravel package for talking to a MikroTik RouterOS device over its
+**REST API**. It gives you a typed, Laravel-friendly way to read a
+router's status and (for a growing, deliberately small set of menus)
+change its configuration, plus optional database-backed monitoring
+(snapshots, threshold alerts, incidents, notifications) built on top of
+the same reads.
 
-**This is P1 through P13 — an intentionally small, incrementally-grown
-release.** It provides connection management and read-only retrieval of
-router resource info, hardware health, interfaces (with cumulative
-traffic counters and a one-shot rate reading), log entries, opt-in
-database persistence of point-in-time monitoring snapshots, opt-in
-threshold rules with a triggered/resolved alert lifecycle, incident
-grouping above that alert lifecycle, a Laravel-scheduler-friendly
-`mikrotik:monitor` command, optional mail/webhook alert notifications,
-read-only history/trend analytics over already-recorded data (including
-incidents), generic read-only RouterOS REST menu access for any menu
-this package doesn't have a named method for, opt-in HTTP retry, an
-internal write transport (P12, not directly exposed), and — P13, the
-first thing actually built on that write transport — a typed,
-read+write API for RouterOS's `/ip/address` menu
-(`$router->ip()->addresses()`). Everything else — DHCP/PPP/firewall/VPN,
-every other RouterOS configuration menu, a binary-API transport, router
-CRUD/management, cross-rule incident correlation, and AI-powered
-diagnosis (`easybdit/laravel-mikrotik-ai`, a separate future package) —
-is **not implemented yet**. See
-[Known limitations](#known-limitations) below for the authoritative
-list.
+**Current release: P1 through P14.** Everything documented below is
+implemented, tested, and — where marked — verified against a real
+RouterOS device. Nothing in this README describes a feature that does
+not exist yet; planned future work is listed separately in
+[Roadmap](#roadmap) and marked **Planned**, never as available today.
 
-## Requirements
+## 1. What this package is
+
+If you've never used this package before, here is the shape of it:
+
+- You configure one or more **connections** (router host + credentials)
+  in `config/mikrotik.php` / `.env` — the same "named connection" idea
+  Laravel uses for `config/database.php`.
+- You get a `RouterConnection` object (via the `Mikrotik` facade) that
+  talks to that router's REST API over HTTPS.
+- Everything it returns is a typed PHP object (a DTO), not a raw array —
+  so `$resource->cpuLoad` instead of guessing at JSON keys.
+
+Capabilities fall into three groups:
+
+**Read capabilities** — get information from the router:
+
+- `resource()` — board/CPU/memory info (`/system/resource`)
+- `health()` — hardware sensors, e.g. temperature/voltage (`/system/health`)
+- `interfaces()` — every interface, with cumulative traffic counters (`/interface`)
+- `interfaceRate()` — a one-shot live traffic-rate reading for one interface
+- `logs()` — router log entries (`/log`)
+- `menu()` — generic **read-only** access to any other RouterOS menu
+- `ip()->addresses()->list()`/`find()` — typed reads of `/ip/address`
+- `interface()->list()`/`find()` — typed reads of `/interface`
+
+**Monitoring** — optional, database-backed, built entirely on the reads
+above (nothing here talks to RouterOS on its own beyond what `resource()`/
+`health()`/`interfaces()` already do):
+
+- Snapshots — a point-in-time capture stored in your own database
+- Rules — threshold conditions evaluated against a snapshot
+- Alerts — a triggered/resolved lifecycle over rule matches
+- Incidents — a stable record grouping one alert's episode
+- Notifications — optional mail/webhook delivery when an alert changes state
+- Analytics — read-only trend/history queries over everything above
+- `mikrotik:monitor` — one artisan command that ties snapshots + rules +
+  incidents + notifications together, meant for Laravel's scheduler
+
+**Write capabilities** — change the router's configuration:
+
+- P12 added an internal write transport (`PUT`/`PATCH`/`DELETE`), not
+  exposed directly — it exists only so the typed resources below can be
+  built on it.
+- P13 exposed the first typed write resource: `ip()->addresses()` —
+  full `list()`/`find()`/`add()`/`update()`/`remove()`/`enable()`/`disable()`
+  for RouterOS's `/ip/address` menu.
+- P14 added a second: `interface()` — `list()`/`find()`/`update()`/
+  `enable()`/`disable()` for RouterOS's `/interface` menu (no `add()`/
+  `remove()` — see [Interface management](#7b-interface-management-p14)).
+- **`menu()` is, and will always remain, read-only.** It never issues a
+  write request under any circumstance. Write access only exists through
+  explicit, typed resource classes like the two above.
+- No other RouterOS configuration menu is implemented yet — no DHCP,
+  PPP/PPPoE, firewall, queues, routes, DNS, users, etc. See
+  [Feature matrix](#18-feature-matrix) for the authoritative list of what
+  exists today, and [Roadmap](#19-roadmap) for what's planned.
+
+## 2. Requirements
 
 - A MikroTik router running **RouterOS v7.1beta4 or later**, with the
-  `www-ssl` service enabled (Winbox/WebFig → IP → Services → `www-ssl`)
-- One of the PHP/Laravel combinations below — each is individually
-  verified installable with Composer (not just declared in
-  `composer.json`) and covered by CI (`.github/workflows/tests.yml`):
+  `www-ssl` service enabled (Winbox/WebFig → **IP → Services → www-ssl**).
+  This package is **HTTPS-only by design** — RouterOS's plain-HTTP REST
+  variant sends credentials as unencrypted HTTP Basic Auth, and there is
+  no configuration option to use it.
+- One of these PHP/Laravel combinations (from `composer.json`, and each
+  individually verified installable, not just declared — see CI at
+  `.github/workflows/tests.yml`):
 
-  | Laravel | Testbench | PHP |
-  |---|---|---|
-  | 10 | ^8.0 | 8.1, 8.2, 8.3, 8.4 |
-  | 11 | ^9.0 | 8.2, 8.3, 8.4 |
-  | 12 | ^10.0 | 8.2, 8.3, 8.4 |
-  | 13 | ^11.0 | 8.3, 8.4 |
+  | Laravel | PHP |
+  |---|---|
+  | 10 | 8.1, 8.2, 8.3, 8.4 |
+  | 11 | 8.2, 8.3, 8.4 |
+  | 12 | 8.2, 8.3, 8.4 |
+  | 13 | 8.3, 8.4 |
 
-  A combination not listed here (e.g. PHP 8.1 with Laravel 11+) is not
+  A combination not listed (e.g. PHP 8.1 with Laravel 11+) is not
   supported — Composer cannot resolve it, since Laravel itself raised its
-  own minimum PHP version partway through that range. The test suite
-  runs on both SQLite and MySQL in CI.
+  minimum PHP version partway through that range.
+- No PHP extensions beyond what Laravel's own HTTP client (Guzzle)
+  already requires for your Laravel version — this package adds none of
+  its own.
+- **RouterOS user permissions:** a read-only RouterOS user (the `read`
+  policy) is enough for every *read* capability above. `ip()->addresses()`
+  and `interface()` (both *write* capabilities) additionally require the
+  `write` policy — confirmed directly against a real device: a `read`-only
+  user gets a `RouterOsException` with RouterOS's own `"not enough
+  permissions (9)"` detail on any write call. Use a dedicated, least-
+  privilege RouterOS user rather than `admin` where practical.
+- `verify_tls` (config/`.env`: `MIKROTIK_VERIFY_TLS`) controls whether
+  this package verifies the router's TLS certificate. Leave it `true` in
+  production. Only set it `false` for a router using a self-signed
+  certificate you have not imported into a trusted CA store, and only if
+  you understand the risk — disabling verification exposes you to
+  man-in-the-middle attacks against your router credentials.
 
-This package is **HTTPS-only by design**, not just by default. RouterOS's
-plain-HTTP REST variant sends your router credentials as unencrypted HTTP
-Basic Auth, and MikroTik's own documentation advises against it outside
-isolated testing. There is no configuration option to use plain HTTP.
-
-## Installation
+## 3. Installation
 
 ```bash
 composer require easybdit/laravel-mikrotik
 ```
+
+Laravel's package auto-discovery registers `MikrotikServiceProvider` and
+the `Mikrotik` facade automatically — no manual provider registration
+needed.
 
 Publish the config file:
 
@@ -61,22 +124,47 @@ Publish the config file:
 php artisan vendor:publish --tag=mikrotik-config
 ```
 
-## Configuration
+This creates `config/mikrotik.php`. Monitoring (snapshots/rules/alerts/
+incidents) needs its own migrations, published separately — see
+[Monitoring](#8-monitoring) below; skip that step if you only need the
+read/write RouterOS API and not the database-backed monitoring features.
 
-Set your router's connection details in `.env`:
+## 4. Basic Configuration
+
+Set your router's connection details in your application's `.env`
+(**never commit this file to Git**):
 
 ```env
 MIKROTIK_CONNECTION=default
 MIKROTIK_HOST=192.168.88.1
 MIKROTIK_PORT=443
 MIKROTIK_USERNAME=admin
-MIKROTIK_PASSWORD=your-password-here
+MIKROTIK_PASSWORD=replace-with-your-own-password
 MIKROTIK_VERIFY_TLS=true
 MIKROTIK_TIMEOUT=10
+MIKROTIK_RETRY_TIMES=0
+MIKROTIK_RETRY_SLEEP=0
 ```
 
-To monitor more than one router, add additional named entries directly in
-`config/mikrotik.php`:
+Every one of these maps directly to a key in `config/mikrotik.php`
+(`env()` calls only — nothing here is invented):
+
+| `.env` variable | Config key | Default |
+|---|---|---|
+| `MIKROTIK_CONNECTION` | `mikrotik.default` | `default` |
+| `MIKROTIK_HOST` | `mikrotik.connections.default.host` | *(required, no default)* |
+| `MIKROTIK_PORT` | `mikrotik.connections.default.port` | `443` |
+| `MIKROTIK_USERNAME` | `mikrotik.connections.default.username` | `admin` |
+| `MIKROTIK_PASSWORD` | `mikrotik.connections.default.password` | `''` |
+| `MIKROTIK_VERIFY_TLS` | `mikrotik.connections.default.verify_tls` | `true` |
+| `MIKROTIK_TIMEOUT` | `mikrotik.connections.default.timeout` | `10` (seconds) |
+| `MIKROTIK_RETRY_TIMES` | `mikrotik.connections.default.retry.times` | `0` (no retry) |
+| `MIKROTIK_RETRY_SLEEP` | `mikrotik.connections.default.retry.sleep` | `0` (milliseconds) |
+
+To monitor more than one router, add additional named entries directly
+in `config/mikrotik.php` (not `.env` — Laravel config files, not `.env`,
+are where you define multiple connections, the same way
+`config/database.php` works):
 
 ```php
 'connections' => [
@@ -93,116 +181,98 @@ To monitor more than one router, add additional named entries directly in
 ],
 ```
 
-`MIKROTIK_VERIFY_TLS` should stay `true` in production. Only set it to
-`false` for a router using a self-signed certificate you have not
-imported into a trusted CA store, and only if you understand the risk
-(disabling TLS verification exposes you to man-in-the-middle attacks
-against your router credentials).
+**Never commit real credentials.** Keep `.env` out of version control
+(Laravel's default `.gitignore` already does this) and never paste a
+real password into a bug report, log message, or this package's tests.
 
-## Usage
+## 5. First Connection
+
+The smallest working example:
 
 ```php
 use Easybdit\LaravelMikrotik\Facades\Mikrotik;
 
-// Default connection
-$router = Mikrotik::connection();
-
-// A specific named connection
-$router = Mikrotik::connection('branch-01');
+$router = Mikrotik::connection();            // the default connection
+$router = Mikrotik::connection('branch-01'); // a specific named connection
 
 $resource = $router->resource();
-echo $resource->version;      // "7.15 (stable)"
-echo $resource->cpuLoad;      // 3 (int, percent)
-echo $resource->freeMemory;   // 1503133696 (int, bytes)
+echo $resource->version;      // e.g. "7.15 (stable)"
+echo $resource->boardName;    // e.g. "RB3011UiAS"
+echo $resource->cpuLoad;      // int, percent
+echo $resource->freeMemory;   // int, bytes
 
 $health = $router->health();
-
 if ($health->has('cpu-temperature')) {
-    echo $health->get('cpu-temperature')->value; // 43 (int)
-    echo $health->get('cpu-temperature')->type;  // "C"
+    echo $health->get('cpu-temperature')->value; // e.g. 43 (int)
+    echo $health->get('cpu-temperature')->type;  // e.g. "C"
 }
-
 // Devices expose different sensors — iterate whatever is actually there:
 foreach ($health as $sensor) {
     echo "{$sensor->name}: {$sensor->value}{$sensor->type}\n";
 }
+
+$interfaces = $router->interfaces();
+$eth1 = $interfaces->get('ether1');
+echo $eth1->type;      // "ether"
+echo $eth1->running;   // bool
+echo $eth1->rxByte;    // int, cumulative bytes received since last reset/reboot
 ```
+
+**Every field on every DTO is nullable** (except an item's own `.id`
+where one exists) — a field a particular RouterOS build/board doesn't
+report simply comes through as `null` instead of raising an error.
+`$dto->raw` (or `->raw()` on a collection-style object) always has the
+complete, untouched response if you need a field this package doesn't
+explicitly type yet.
+
+`resource()`/`health()` return a single object; `interfaces()`/`logs()`
+return an iterable collection-like object; see
+[Architecture overview](#17-architecture-overview) for how these fit
+together, and the sections below for `interfaceRate()`, `logs()`, and
+the write APIs.
 
 ### Interfaces and traffic counters
 
 ```php
-$interfaces = $router->interfaces();
-
-$eth1 = $interfaces->get('ether1');
-echo $eth1->type;         // "ether"
-echo $eth1->running;      // true (bool)
-echo $eth1->rxByte;       // 205164277 (int, cumulative bytes received)
-echo $eth1->rxError;      // 0 (int)
-echo $eth1->linkDowns;    // 2 (int)
-
-foreach ($interfaces as $interface) {
+foreach ($router->interfaces() as $interface) {
     echo "{$interface->name}: {$interface->rxByte} rx / {$interface->txByte} tx\n";
 }
 ```
 
 **Traffic counters are cumulative, not live.** `rxByte`/`txByte`/
-`rxPacket`/`txPacket`/`rxError`/`txError`/`rxDrop`/`txDrop` are the
-totals RouterOS has counted since the interface's counters were last
-reset — in practice, since the last reboot. This package does **not**
-offer a live/instantaneous throughput reading here — see
-[One-shot interface rate](#one-shot-interface-rate) below for that, or
-poll `interfaces()` twice and divide the delta by the elapsed time:
+`rxPacket`/`txPacket`/`rxError`/`txError`/`rxDrop`/`txDrop` are totals
+since the interface's counters were last reset — in practice, since the
+last reboot. A reboot resets these to zero; a delta computed across a
+reboot reads as negative/nonsensical, not as an error — this package
+does not detect or guard against that. For a live rate, either use
+`interfaceRate()` below, or poll `interfaces()` twice yourself:
 
 ```php
 $before = $router->interfaces()->get('ether1')->rxByte;
 sleep(5);
 $after = $router->interfaces()->get('ether1')->rxByte;
-
 $bytesPerSecond = ($after - $before) / 5;
 ```
-
-Be aware that a reboot resets these counters to zero — a delta taken
-across a reboot will read as negative or nonsensical, not as an error;
-this package does not detect or guard against that case.
-
-`interfaces()` makes a single RouterOS REST call: `GET /rest/interface`.
-An earlier version of this package additionally called `POST
-/interface/print` with `{"stats-detail":""}`, on the assumption that
-counters needed a separate "stats" view — that's how RouterOS's own
-console splits them (`/interface print` vs `/interface print
-stats-detail`). Real-device verification (RouterOS 7.10.2, RB3011UiAS)
-showed the REST endpoint returns the full field set, counters included,
-in one response, so the second call was removed.
 
 ### One-shot interface rate
 
 ```php
 $rate = $router->interfaceRate('ether1');
-
-echo $rate->rxBitsPerSecond;    // 159176 (int)
-echo $rate->txBitsPerSecond;    // 227456 (int)
-echo $rate->rxPacketsPerSecond; // 182 (int)
+echo $rate->rxBitsPerSecond;    // int
+echo $rate->txBitsPerSecond;    // int
+echo $rate->rxPacketsPerSecond; // int
 ```
 
-This is RouterOS's `/interface monitor-traffic ... once` — a single
-instantaneous rate reading RouterOS itself computes over a brief
-internal sampling window, **not** a live/streaming subscription.
-Verified directly against a real device: `POST
-/rest/interface/monitor-traffic` with body `{"interface": "ether1",
-"once": ""}`. An invalid interface name throws `RouterOsException` with
-RouterOS's own message (`"input does not match any value of
-interface"`).
-
-Do not confuse this with `interfaces()`'s cumulative counters: this
-method makes a fresh request every call and returns whatever RouterOS
-measured at that moment, with no history retained by this package.
+This calls RouterOS's `/interface monitor-traffic ... once` — a single
+instantaneous rate reading RouterOS computes over a brief internal
+sampling window, **not** a live/streaming subscription. Each call makes
+a fresh request; nothing is cached or held open. An invalid interface
+name throws `RouterOsException` with RouterOS's own message.
 
 ### Logs
 
 ```php
-$logs = $router->logs();
-
-foreach ($logs as $entry) {
+foreach ($router->logs() as $entry) {
     echo "{$entry->time} [{$entry->topics}] {$entry->message}\n";
 }
 
@@ -210,25 +280,18 @@ foreach ($logs as $entry) {
 $criticalOnly = $router->logs(['topics' => 'critical']);
 ```
 
-`$entry->time` and `$entry->topics` are preserved exactly as RouterOS
-returns them and are **not** parsed. MikroTik's own documentation
-confirms the console log timestamp omits the date entirely for today's
-entries and omits the year always — there is no single safe format to
-normalize into without risking silent misinterpretation. `topicsList()`
-offers a best-effort comma-split of `topics` for convenience, but is not
-authoritative.
+`$entry->time`/`$entry->topics` are kept exactly as RouterOS returns
+them and are **not** parsed — RouterOS's console timestamp omits the
+date for today's entries and omits the year entirely, so there is no
+single safe format to normalize into. Filtering only supports simple
+equality (`?field=value`); RouterOS's console-only `~` (contains/regex)
+operator is not supported over REST.
 
-Filtering only supports simple equality (RouterOS REST's documented
-`?field=value` query-string form). RouterOS's console-only `~`
-(contains/regex) filter operator is not supported over REST filtering in
-this phase.
+## 6. Generic Menu API
 
-### Generic menu access (P9)
-
-`resource()`, `health()`, `interfaces()`, `interfaceRate()`, and `logs()`
-are named, typed methods for five specific RouterOS menus. For anything
-else, `menu()` gives generic read-only access to any RouterOS REST menu,
-without waiting for this package to add a named method for it:
+`resource()`/`health()`/`interfaces()`/`interfaceRate()`/`logs()` are
+named, typed methods for five specific menus. For anything else,
+`menu()` gives generic **read-only** access to any RouterOS REST menu:
 
 ```php
 $addresses = $router->menu('ip/address')->get();
@@ -237,7 +300,7 @@ foreach ($addresses as $address) {
     echo "{$address['address']} on {$address['interface']}\n";
 }
 
-// Simple equality filtering -- the same `?field=value` form logs() uses:
+// Simple equality filtering — the same `?field=value` form logs() uses:
 $onBridge1 = $router->menu('ip/address')->get(['interface' => 'bridge1']);
 
 // A single item by its RouterOS ".id" (e.g. "*1") or, where the menu
@@ -245,125 +308,92 @@ $onBridge1 = $router->menu('ip/address')->get(['interface' => 'bridge1']);
 $item = $router->menu('interface')->find('ether1');
 ```
 
-`get()` returns an `Illuminate\Support\Collection` of **raw, untyped
-associative arrays** — exactly RouterOS's REST JSON as-is (every value
-still a JSON-encoded string, per RouterOS REST's own convention). Unlike
-the five named methods above, `menu()` has no fixed schema to safely
-guess field types from for an arbitrary menu, so it never attempts to —
-normalize whatever fields you need yourself.
+- **Read-only.** `menu()` never issues a write request — there is no
+  `add()`/`set()`/`remove()`/`enable()`/`disable()` on it, and this will
+  never change. Write access only ever exists through explicit typed
+  resources like `ip()->addresses()`/`interface()`.
+- **`get()`** returns a plain `Illuminate\Support\Collection` of **raw,
+  untyped associative arrays** — exactly RouterOS's REST JSON as-is
+  (every value still a JSON-encoded string, per RouterOS REST's own
+  convention). Unlike the named DTOs, `menu()` has no fixed schema for an
+  arbitrary path, so it never guesses field types — normalize whatever
+  fields you need yourself.
+- **`find()`** does not convert a "not found" condition to `null` — any
+  RouterOS-side error, including "not found", surfaces as
+  `RouterOsException` (or `AuthenticationException`/`ConnectionException`,
+  as appropriate), the same as every other method in this package.
+- Every menu path and item identifier is validated against a strict
+  allow-list before a request is ever sent — a path traversal (`..`), an
+  absolute URL, or protocol-like input (`http://...`) throws
+  `InvalidMenuPathException` immediately, without reaching the router.
 
-`find()` does **not** convert a "not found" condition to `null`.
-RouterOS's documented error shape for a `DELETE` on an unknown identifier
-is confirmed (`{"error":404,"message":"Not Found"}`), but the equivalent
-for a `GET` was not independently confirmed against a live device, so
-this deliberately does not guess which failure to swallow — any error,
-including "not found", surfaces as the same `RouterOsException` (or
-`AuthenticationException`/`ConnectionException`, as appropriate) every
-other RouterOS-side failure already does.
+## 7. IP Address Management
 
-`menu()` only ever issues a `GET` (RouterOS's documented `print`) —
-**there is no `add()`/`set()`/`remove()`/`enable()`/`disable()` in this
-phase**, and every menu path and item identifier is validated against a
-strict allow-list before use, so a caller cannot escape the `/rest/` API
-root, inject a scheme/host, or attempt a path-traversal segment (`..`) —
-an invalid one throws `InvalidMenuPathException` immediately rather than
-being sent to the router at all.
-
-*A brief note on positioning: generic read-only RouterOS REST menu
-access is provided without requiring callers to use a menu-specific DTO
-— useful once you need a menu this package hasn't named yet, while the
-five typed methods above remain the richer, safer choice for what they
-already cover.*
-
-### Write transport foundation (P12, internal only)
-
-P12 adds `put()`/`patch()`/`delete()` to this package's internal
-`Transport` contract — RouterOS REST's documented `add`/`set`/`remove`
-verbs. `menu()` remains exactly as described above (GET-only) and
-always will; write access is only ever exposed through explicit, typed
-resource methods like `ip()->addresses()` below (P13) — never through
-`menu()`.
-
-Write requests **never** use the read-path retry configuration
-(`connections.*.retry`, see [Retry](#retry-opt-in-p9) below), regardless
-of how it's set — an ambiguous failure (timeout, dropped connection)
-after a write already reached RouterOS cannot be safely retried without
-risking a duplicate "add" or a reapplied "set"/"remove". Write retry is
-not implemented at all in this phase.
-
-### IP address management (P13)
-
-The first typed resource built on the P12 write transport —
-`$router->ip()->addresses()` maps to RouterOS's `/ip/address` menu:
+`$router->ip()->addresses()` maps to RouterOS's `/ip/address` menu — the
+first typed **read+write** resource, built on P12's internal write
+transport:
 
 ```php
 use Easybdit\LaravelMikrotik\Exceptions\RouterOsException;
 
 $addresses = $router->ip()->addresses();
 
-$addresses->list();                                  // Collection<DTO\IpAddress>
-$addresses->list(['interface' => 'bridge1']);         // simple equality filter, same form as logs()/menu()
-$addresses->find('*1');                               // DTO\IpAddress, by ".id" or name
+$addresses->list();                              // Collection<DTO\IpAddress>
+$addresses->list(['interface' => 'bridge1']);     // simple equality filter
+$addresses->find('*1');                           // DTO\IpAddress, by ".id" or name
 
 $created = $addresses->add([
-    'address'   => '192.168.88.1/24',
-    'interface' => 'bridge1',
-]);                                                    // throws InvalidResourceException if 'address' is missing
+    'address'   => '192.168.88.1/24', // required
+    'interface' => 'bridge1',         // optional, but almost always needed
+]);                                                // throws InvalidResourceException if 'address' is missing
 
-$addresses->update($created->id, ['comment' => 'lan']);
-$addresses->disable($created->id);                    // PATCH {"disabled": "true"}
-$addresses->enable($created->id);                     // PATCH {"disabled": "false"}
-$addresses->remove($created->id);                     // DELETE — RouterOS's documented empty-body success
+$addresses->update($created->id, ['comment' => 'lan']); // any RouterOS field
+$addresses->disable($created->id);                // PATCH {"disabled": "true"}
+$addresses->enable($created->id);                 // PATCH {"disabled": "false"}
+$addresses->remove($created->id);                 // DELETE — RouterOS's documented empty-body success
 ```
 
-`add()`/`update()` return the full `DTO\IpAddress` RouterOS's own
-documented response already includes (`.id`, `address`, `network`,
-`interface`, `actual-interface`, `disabled`, `dynamic`, `invalid`,
-`comment` — anything else stays in `->raw`). `enable()`/`disable()` are
-thin wrappers around `update()`'s documented ability to PATCH any
-field — RouterOS REST has no separate documented enable/disable
-endpoint. Every `$id` (`find()`/`update()`/`remove()`/`enable()`/
-`disable()`) is validated against the same safe-identifier allow-list
-`menu()` already uses, so this cannot be used to escape the `/rest/`
-API root either. Every RouterOS-side failure (400/404/etc.) surfaces as
-the existing `RouterOsException`, exactly like every other method in
-this package.
+- **`add()`** requires `address` (RouterOS itself requires more for the
+  configuration to be meaningful — e.g. `interface` — but this package
+  only validates what it can safely guarantee before sending a request;
+  RouterOS validates the rest and returns a `RouterOsException` if
+  something else is missing/invalid).
+- **`add()`/`update()`** return the full `DTO\IpAddress` RouterOS's
+  documented response includes: `.id`, `address`, `network`, `interface`,
+  `actual-interface`, `disabled`, `dynamic`, `invalid`, `comment` —
+  anything else stays available in `->raw`.
+- **`enable()`/`disable()`** are thin `update()` wrappers PATCHing the
+  `disabled` field as the string `"true"`/`"false"` — RouterOS REST has
+  no separate documented enable/disable endpoint. **Confirmed against a
+  real device** that this string format (not `"yes"`/`"no"`) is correct.
+- Every `$id` (`find()`/`update()`/`remove()`/`enable()`/`disable()`) is
+  validated against the same safe-identifier allow-list `menu()` uses.
+- Every RouterOS-side failure (400/404/etc.) surfaces as
+  `RouterOsException`, exactly like every other method in this package.
 
-**Real-device verification: complete.** Verified with `Http::fake()`
-against MikroTik's own documented request/response examples
-(`help.mikrotik.com` "REST API"), and additionally against a live
-RouterOS **7.10.2** device (board **RB3011UiAS**). Two earlier
-connectivity attempts had failed before authentication succeeded (a
-connection timeout, then an HTTP 401 under a read-only user); with a
-dedicated read-write test user, a full pass succeeded end to end
-against a temporary, non-routable test address
-(`203.0.113.99/32`, RFC 5737) on an idle, link-down interface with no
-address previously assigned: `list()`, `add()`, `find()`/`list()`
-verification, `update()`, `disable()`, `enable()`, and `remove()`, with
-`find()` confirming RouterOS's actual state after every write and a
-final `list()` confirming complete cleanup. **This confirmed the
-`disabled` field's write wire format is the string `"true"`/`"false"`**
-(matching GET's own convention), not the classic console `"yes"`/`"no"`
-— the package's original assumption was correct, so no code changed.
-No production address, firewall, DHCP, PPP, routing, or other
-interface configuration was touched.
+**A safe, documentation-only example for trying this yourself:**
+`203.0.113.99/32` is reserved by [RFC 5737](https://www.rfc-editor.org/rfc/rfc5737)
+specifically for documentation — it is never a real, routable address on
+any real network, which is why it is used throughout this README and in
+this package's own real-device tests. It is still a **write** operation
+against your real router's configuration — see
+[Real MikroTik Testing Guide](#12-real-mikrotik-testing-guide) before
+trying it, and never run this kind of example against a production
+address, interface, or router you cannot afford to misconfigure.
 
-### Interface management (P14)
+### 7b. Interface management (P14)
 
-A second typed resource on the P12 write transport, alongside P13's
-`ip()` — `$router->interface()` maps to RouterOS's `/interface` menu.
-Deliberately named singular ("interface", not "interfaces") to avoid
-any confusion with the pre-existing, unrelated, read-only
-`$router->interfaces()` (cumulative traffic counters, keyed by name,
-unchanged by this phase):
+A second typed **read+write** resource, alongside `ip()` above —
+`$router->interface()` maps to RouterOS's `/interface` menu. Named
+singular (`interface()`, not `interfaces()`) specifically to avoid any
+confusion with the unrelated, **read-only** `interfaces()` from
+[section 5](#5-first-connection) — that method is completely unchanged:
 
 ```php
-use Easybdit\LaravelMikrotik\Exceptions\RouterOsException;
-
 $iface = $router->interface();
 
 $iface->list();                              // Collection<DTO\InterfaceRecord>
-$iface->list(['type' => 'ether']);           // simple equality filter, same form as ip()->addresses()->list()
+$iface->list(['type' => 'ether']);           // simple equality filter
 $iface->find('ether7');                      // DTO\InterfaceRecord, by name or ".id"
 
 $iface->update('ether7', ['comment' => 'uplink']);
@@ -371,126 +401,86 @@ $iface->disable('ether7');                   // PATCH {"disabled": "true"}
 $iface->enable('ether7');                    // PATCH {"disabled": "false"}
 ```
 
-`update()` returns the `DTO\InterfaceRecord` RouterOS's response
-includes (`.id`, `name`, `type`, `running`, `disabled`, `comment` —
-anything else stays in `->raw`; the fuller counter set already exposed
-by `interfaces()`/`DTO\RouterInterface` is not duplicated here).
-`enable()`/`disable()` are thin `update()` wrappers, the same
-convention P13 uses. Every `$id` (`find()`/`update()`/`enable()`/
-`disable()`) is validated against the same safe-identifier allow-list
-`menu()`/`ip()->addresses()` already use.
+- **No `add()`/`remove()`.** RouterOS's own REST documentation does not
+  confirm `PUT`/`DELETE` support for `/interface`, and RouterOS itself
+  does not generally support creating/destroying a *physical* interface
+  through this generic menu — this package does not invent behavior it
+  has no documented or observed basis for.
+- **`update()`** returns `DTO\InterfaceRecord` (`.id`, `name`, `type`,
+  `running`, `disabled`, `comment`; `->raw` has everything else). This is
+  a smaller field set than `interfaces()`'s `DTO\RouterInterface` (which
+  already has the full counter set for read-only use) — the two DTOs are
+  deliberately not merged.
+- `$id` accepts either a RouterOS `.id` or the interface's own name
+  (e.g. `"ether7"`) — confirmed against a real device.
+- **Confirmed against a real device** that `disabled` uses the same
+  `"true"`/`"false"` string convention as `ip()->addresses()`.
 
-**No `add()`/`remove()`.** MikroTik's own REST documentation does not
-confirm PUT/DELETE support for `/interface`, and RouterOS itself does
-not generally support creating/destroying a physical interface through
-this generic menu (only specific virtual-interface submenus like
-`/interface/vlan` do) — this package does not invent behavior it has
-no documented or observed basis for.
+## 8. Monitoring
 
-**Real-device verification: complete.** Verified with `Http::fake()`
-against the same documentation conventions confirmed for P13 (the
-documented `/interface` GET example addresses an item by name in the
-URL, and PATCH's `{"field": "value"}` body contract is documented as
-menu-agnostic), and additionally against the same live RouterOS
-**7.10.2** device (board **RB3011UiAS**) used for P13. Using the idle,
-link-down `ether7` (no address assigned, confirmed via P13's own
-verification pass): `list()`/`find()` by name, `disable()` then
-`enable()` with `find()` confirming RouterOS's actual state after each
-— **confirming the `disabled` field's write wire format is `"true"`/
-`"false"` for `/interface` too** — then `update()` of the `comment`
-field with `find()` confirming it, followed by restoring the original
-comment exactly and a final `find()` confirming the interface's state
-matched its pre-test baseline. No production interface, IP address,
-routing, firewall, DHCP, or PPP/PPPoE configuration was touched, and
-the router was never rebooted.
+Everything in this section is **opt-in** — an application that never
+publishes/runs these migrations is completely unaffected by any of it.
 
-### Retry (opt-in, P9)
-
-Every connection can opt into retrying a request that failed for a
-transient reason:
-
-```php
-'connections' => [
-    'default' => [
-        // ...
-        'retry' => [
-            'times' => 3,   // 0 (default) = no retry, identical to every version of this package before P9
-            'sleep' => 500, // milliseconds between attempts
-        ],
-    ],
-],
-```
-
-Only a transient connection failure (timeout/DNS/refused) or a
-RouterOS-side `5xx` response is retried — **never** a `401`/`403`
-(`AuthenticationException`) or any other `4xx` (a RouterOS-side
-rejection, e.g. a bad query, which retrying would not change). This is
-safe to enable for every method in this package: P9 added no write
-operation, and the one existing `POST` use
-(`interfaceRate()`'s `monitor-traffic ... once`) is idempotent. Retry is
-per connection, uses Laravel's own `Http` client retry mechanism (no
-second retry/locking system was built for this), and does not change
-`timeout` behavior.
-
-### Monitoring snapshots (opt-in persistence)
-
-P4 adds an opt-in way to record a point-in-time capture of a connection's
-`resource()`, `health()`, and `interfaces()` into your application's own
-database, for later inspection or trend analysis. This is entirely
-additive — nothing in P1-P3 requires it, and an application that never
-publishes/runs the migration below is completely unaffected.
-
-Publish and run the migration:
+Publish and run the monitoring migrations:
 
 ```bash
 php artisan vendor:publish --tag=mikrotik-migrations
 php artisan migrate
 ```
 
-Then record a snapshot:
+This creates four tables: `mikrotik_snapshots`, `mikrotik_rules`,
+`mikrotik_alerts`, `mikrotik_incidents` — all in **your own application's
+database**, using your normal Eloquent connection and access controls.
+None of them store router credentials.
+
+Record a snapshot (a point-in-time capture of `resource()`/`health()`/
+`interfaces()`, stored as JSON columns — RouterOS's already-normalized
+output is stored as-is, never re-interpreted):
 
 ```php
 use Easybdit\LaravelMikrotik\Monitoring\SnapshotRecorder;
 
-$recorder = app(SnapshotRecorder::class);
+$snapshot = app(SnapshotRecorder::class)->record();          // default connection
+$snapshot = app(SnapshotRecorder::class)->record('branch-01'); // a specific one
 
-$snapshot = $recorder->record();          // default connection
-$snapshot = $recorder->record('branch-01'); // a specific named connection
-
-$snapshot->connection;   // "default"
-$snapshot->captured_at;  // Carbon instance
-$snapshot->resource;     // array — same shape as RouterResource::toArray()
-$snapshot->health;       // array keyed by sensor name — HealthReading::toArray()
-$snapshot->interfaces;   // array keyed by interface name — InterfaceCollection::toArray()
+$snapshot->resource;    // array, same shape as RouterResource::toArray()
+$snapshot->health;      // array keyed by sensor name
+$snapshot->interfaces;  // array keyed by interface name
 ```
 
-`record()` makes the same REST calls `resource()`/`health()`/
-`interfaces()` already make (one call each) and stores their already-
-normalized output as JSON columns — it does not re-interpret or
-re-normalize RouterOS's response. Query recorded snapshots with the
-`Easybdit\LaravelMikrotik\Models\MikrotikSnapshot` Eloquent model:
+Then, to tie snapshot-recording and rule-evaluation together on a
+schedule, run (or schedule) the artisan command:
+
+```bash
+php artisan mikrotik:monitor                          # every configured connection
+php artisan mikrotik:monitor --connection=branch-01    # a specific one (repeatable)
+```
+
+`mikrotik:monitor` does, for each connection: record a snapshot →
+evaluate every enabled rule that applies to it → reconcile incidents →
+deliver any configured notifications for a newly triggered/resolved
+alert. A failure on one connection (unreachable router, rejected
+credentials, a RouterOS error, a database error) is reported via a
+console error line and does **not** stop the others from being
+processed — this is what makes running it repeatedly/on a schedule
+safe. This package does **not** register its own schedule entry —
+add it to Laravel's own scheduler yourself:
 
 ```php
-use Easybdit\LaravelMikrotik\Models\MikrotikSnapshot;
+use Illuminate\Support\Facades\Schedule;
 
-$recent = MikrotikSnapshot::query()
-    ->forConnection('branch-01')
-    ->latest('captured_at')
-    ->limit(50)
-    ->get();
+Schedule::command('mikrotik:monitor')->everyFiveMinutes()->withoutOverlapping();
 ```
 
-This phase does **not** include a scheduler, artisan command, or any
-automatic/recurring snapshot capture — see
-[Known limitations](#known-limitations). Calling `record()` is entirely
-up to your application (e.g. from your own scheduled command).
+`->withoutOverlapping()` is Laravel's own cache-based lock; this package
+deliberately does not build a second one — see
+[Concurrency](#concurrency) below for what protects you if it still
+overlaps.
 
-### Rules and alerts (opt-in, built on snapshots)
+## 9. Rules
 
-P5 adds opt-in threshold rules, evaluated against a `MikrotikSnapshot`
-(see above — this depends on P4). A rule is a plain Eloquent row you
-create yourself; there is no config-file or artisan-command way to
-define one in this phase.
+A rule is a plain Eloquent row you create yourself — there is no
+config-file or artisan-command way to define one:
 
 ```php
 use Easybdit\LaravelMikrotik\Models\MikrotikRule;
@@ -501,175 +491,88 @@ MikrotikRule::query()->create([
     'metric'     => 'resource.cpu_load',
     'operator'   => '>',           // one of: > >= < <= == !=
     'threshold'  => 90,
+    'enabled'    => true,          // default
 ]);
 ```
 
-`metric` is a dot path into the snapshot's stored data: the first
-segment must be `resource`, `health`, or `interfaces` (matching
-`MikrotikSnapshot`'s three columns), and the rest is resolved with
-`Illuminate\Support\Arr::get()`, e.g. `health.cpu-temperature.value` or
-`interfaces.ether1.rx_error`. An unsupported `operator` or a `metric`
-that doesn't start with one of those three prefixes throws
-`InvalidRuleException` immediately when the rule is saved, not later
-when it happens to be evaluated.
-
-Evaluate a snapshot against every enabled rule that applies to its
-connection (a rule with `connection` left `null` applies to all of
-them):
+- **`metric`** is a dot path into a recorded snapshot's stored data. The
+  first segment must be `resource`, `health`, or `interfaces` (matching
+  the three JSON columns on `mikrotik_snapshots`) — e.g.
+  `resource.cpu_load`, `health.cpu-temperature.value`,
+  `interfaces.ether1.rx_error`. This package does **not** invent metric
+  names beyond what `resource()`/`health()`/`interfaces()` already
+  expose — see their `toArray()` methods for the exact field names
+  available under each prefix.
+- **`operator`** must be one of `>`, `>=`, `<`, `<=`, `==`, `!=`. Both
+  this and an unsupported `metric` prefix throw `InvalidRuleException`
+  **immediately when the rule is saved**, not later when it happens to
+  be evaluated.
+- **Global vs. connection-specific:** `connection = null` applies the
+  rule to every connection; set it to a specific connection name to
+  scope it to just that one.
+- **`enabled`**: a disabled rule is simply skipped by evaluation.
+- **Missing metrics:** a metric absent from a given snapshot (a sensor
+  this device doesn't expose, an interface not present) is silently
+  skipped — not treated as a match, and does **not** resolve an existing
+  active alert.
+- **Deduplication:** a rule that matches again while it already has an
+  active (`'triggered'`) alert does not create a duplicate row.
+- **Resolution:** a rule that stops matching while it has an active
+  alert flips that alert to `'resolved'` (`resolved_at` set) — the row
+  is never deleted, so history is preserved. If the same rule matches
+  again later, a **new, separate** alert row is created (the old one is
+  never reopened).
 
 ```php
 use Easybdit\LaravelMikrotik\Monitoring\RuleEvaluator;
 
-$snapshot = app(\Easybdit\LaravelMikrotik\Monitoring\SnapshotRecorder::class)->record('branch-01');
-
-$alerts = app(RuleEvaluator::class)->evaluate($snapshot);
-
-foreach ($alerts as $alert) {
-    echo "{$alert->metric} {$alert->operator} {$alert->threshold} (was {$alert->value})\n";
-}
+$alerts = app(RuleEvaluator::class)->evaluate($snapshot); // list<MikrotikAlert>, newly-triggered only
 ```
 
-A metric absent from a given snapshot (a sensor this device doesn't
-expose, an interface that wasn't present) is silently skipped, the same
-way `resource()`/`health()`/`interfaces()` never throw for absent device
-data — it is not treated as a rule match, and does **not** resolve an
-existing active alert (see lifecycle below).
+`evaluate()` only returns *newly-triggered* alerts in its return value —
+a resolution or a deduplicated repeat still updates the database but
+produces no entry in the returned array. Query
+`MikrotikAlert::query()->active()` / `->resolved()` for either state.
 
-Each `MikrotikAlert` carries a simple two-state lifecycle, tracked in
-`status` (`'triggered'` or `'resolved'`) and `resolved_at`:
+### Concurrency
 
-- A rule matches and has no active alert yet → a new alert is created
-  with `status = 'triggered'`.
-- A rule matches again while its alert is still active → **no duplicate
-  row** is created (deduplication).
-- A rule stops matching while it has an active alert → that alert is
-  flipped to `status = 'resolved'`, `resolved_at` set — never deleted.
-- The same rule matches again afterwards → since no active alert
-  remains, a **new, separate** historical alert row is created.
+Two `mikrotik:monitor` runs evaluating the same rule+connection at
+nearly the same time cannot both create an active alert or an open
+incident for it — both `mikrotik_alerts` and `mikrotik_incidents` carry
+a real **database unique index**, not an application-level check with a
+race window. The losing insert fails with a genuine integrity-constraint
+error, which is caught and treated as "the other process already did
+this," never as an error and never as a duplicate row. This is not a
+claim of distributed locking — prefer `->withoutOverlapping()` on the
+scheduler to avoid the overlap in the first place; this is the safety
+net for when it still happens.
 
-`RuleEvaluator::evaluate()` only returns newly-created (`'triggered'`)
-alerts; a resolution or a deduplicated repeat produces no entry in the
-returned array, though the underlying row is still updated/left as-is.
-History is never deleted — query `MikrotikAlert::query()->resolved()` /
-`->active()` for either state.
-
-### Incidents (P10, built on the alert lifecycle)
+### Incidents
 
 An alert (above) is one row per continuous triggered→resolved episode
 of one rule. An **incident** wraps that same episode in a longer-lived,
-stable record — `Monitoring\IncidentManager::reconcile()` opens one the
-moment `RuleEvaluator` creates a new `'triggered'` alert, and resolves
-it the moment that alert flips to `'resolved'`:
+stable record. In the current implementation, one incident maps
+one-to-one onto one alert episode (a rule's own deduplication already
+guarantees at most one active alert at a time, so there is nothing yet
+to group across *multiple* alert rows):
 
 ```php
 use Easybdit\LaravelMikrotik\Monitoring\IncidentManager;
 
 $transitions = app(IncidentManager::class)->reconcile($triggeredAlerts, $justResolvedAlerts);
-
 $transitions['opened'];   // list<MikrotikIncident> newly opened this call
 $transitions['resolved']; // list<MikrotikIncident> newly resolved this call
 ```
 
-`mikrotik:monitor` (P6) already calls this for you every run — see
-below. `$triggeredAlerts`/`$justResolvedAlerts` are exactly what
-`RuleEvaluator::evaluate()` returns and what the command already derives
-for its own notifications; `IncidentManager` does not re-derive rule
-matching itself.
+`mikrotik:monitor` already calls this for you every run. Cross-rule
+correlation (relating incidents from *different* rules that might share
+a root cause) is not implemented — see [Feature matrix](#18-feature-matrix).
 
-**In this phase, one incident maps one-to-one onto one alert episode** —
-P5's own alert deduplication already guarantees at most one active alert
-per rule (and, per connection, for a global rule — see below), so there
-is nothing to group across *multiple* alert rows yet:
+## 10. Notifications
 
-- Repeated matching snapshots reuse the same open incident (no
-  duplicate rows) — mirrors the alert's own dedup exactly.
-- A missing metric leaves an open incident untouched, the same way it
-  leaves the alert untouched — it is never treated as "resolved."
-- The same rule matching again after resolution opens a **new, separate**
-  incident, mirroring how a resolved alert matching again creates a new
-  historical alert rather than reviving the old one.
-- `MikrotikAlert::$incident_id` links an alert to its incident (nullable
-  — an alert recorded before P10, or one somehow evaluated without a
-  rule, has none). `MikrotikIncident::firstAlert()`/`alerts()` are the
-  reverse relations.
-
-Safe under two concurrent `mikrotik:monitor` processes: opening an
-incident is a single `INSERT` guarded by a real database unique index
-(`mikrotik_incidents`' `(open_rule_id, connection)`, nullable-while-open
-so any number of *resolved* incidents for the same rule/connection
-coexist freely) — if two processes race to open the same rule's
-incident, the loser's `INSERT` fails with a genuine database
-integrity-constraint error, which `IncidentManager` catches and treats
-as "the other process already opened it," not an error. This is real
-database-level protection, not a claim of distributed locking (there is
-none).
-
-Notification timing is **unchanged** by P10: `mikrotik:monitor` still
-notifies from the same alert triggered/resolved transitions it already
-did in P7 (see below) — since incident transitions currently coincide
-exactly with those, this is not a behavior change today, only correct
-groundwork for a future phase that might group multiple alert episodes
-into one incident (not implemented — see
-[Known limitations](#known-limitations)).
-
-### Concurrency (P11)
-
-Two `mikrotik:monitor` processes (e.g. an overlapping scheduled run, or
-one run manually while another is still in flight) evaluating the same
-rule+connection at nearly the same time cannot both create an active
-alert or an open incident for it. Both `mikrotik_alerts` and
-`mikrotik_incidents` carry a real database **unique index**
-(`(active_rule_id, connection)` / `(open_rule_id, connection)`,
-nullable-while-inactive so history is never restricted) — the loser's
-`INSERT` fails with a genuine database integrity-constraint error, which
-`RuleEvaluator`/`IncidentManager` catch and treat as "the other process
-already created it," not an error, and not a duplicate row. This is a
-real database-level guarantee, not an application-level check with a
-race window, and it is **not** a claim of distributed locking — none is
-implemented. Prefer `->withoutOverlapping()` on Laravel's scheduler (see
-[Scheduled monitoring](#scheduled-monitoring-mikrotikmonitor-p6)) to
-avoid overlapping runs in the first place; this is the safety net for
-when that still happens (a manual run, a missed lock, etc.).
-
-### Scheduled monitoring (`mikrotik:monitor`, P6)
-
-P6 adds an artisan command that ties P4 and P5 together: for one or more
-connections, it records a snapshot (`SnapshotRecorder`) and evaluates it
-(`RuleEvaluator`) in one step. Since P10, it also reconciles incidents
-(`IncidentManager`) from the same result and reports opened/resolved
-counts in its own console output — see
-[Incidents](#incidents-p10-built-on-the-alert-lifecycle) above.
-
-```bash
-php artisan mikrotik:monitor                          # every configured connection
-php artisan mikrotik:monitor --connection=branch-01    # a specific one (repeatable)
-```
-
-This package does **not** register its own schedule entry — put it on
-Laravel's own scheduler, in your application's `routes/console.php`:
-
-```php
-use Illuminate\Support\Facades\Schedule;
-
-Schedule::command('mikrotik:monitor')->everyFiveMinutes()->withoutOverlapping();
-```
-
-`->withoutOverlapping()` is Laravel's own cache-based lock; this package
-deliberately does not build a second one. Each connection is handled
-independently inside the command: a failure capturing one (unreachable
-router, rejected credentials, a RouterOS-side error, or — P11 — any
-other unexpected failure, e.g. a database error) is reported via a
-console error line and does not stop the others, and each run is
-independent of the last (no state carried between invocations) — which
-is what makes running it repeatedly/on a schedule safe. The command
-exits successfully if at least one connection succeeded.
-
-### Notifications (opt-in, P7)
-
-P7 adds optional mail/webhook delivery when `mikrotik:monitor` (P6)
-observes an alert newly become `'triggered'` or `'resolved'`. Both
-channels are disabled by default — set the relevant `MIKROTIK_NOTIFY_*`
-variables to enable one or both:
+Optional mail/webhook delivery when `mikrotik:monitor` observes an alert
+newly become `'triggered'` or `'resolved'`. **Both channels are disabled
+by default:**
 
 ```env
 MIKROTIK_NOTIFY_MAIL_ENABLED=true
@@ -679,9 +582,9 @@ MIKROTIK_NOTIFY_WEBHOOK_ENABLED=true
 MIKROTIK_NOTIFY_WEBHOOK_URL=https://example.com/hooks/mikrotik
 ```
 
-With neither variable set, `Monitoring\AlertNotifier::notify()` is a
-silent no-op — Laravel's `Notification` facade is never touched. You can
-also call it directly for your own alerts:
+With neither variable set, `AlertNotifier::notify()` is a silent no-op —
+Laravel's `Notification` facade is never touched. You can also call it
+directly for your own alerts:
 
 ```php
 use Easybdit\LaravelMikrotik\Monitoring\AlertNotifier;
@@ -689,19 +592,20 @@ use Easybdit\LaravelMikrotik\Monitoring\AlertNotifier;
 app(AlertNotifier::class)->notify($alert); // $alert: MikrotikAlert
 ```
 
-Delivery uses Laravel's own on-demand/anonymous notifiable
-(`Notification::route(...)`) rather than a host application's `User`
-model — this package has no concept of a "user" to notify. The webhook
-channel POSTs a JSON payload (`id`, `status`, `connection`, `metric`,
+**Security notes:** delivery uses Laravel's own on-demand/anonymous
+notifiable — this package has no "user" model to notify, and
+`config('mikrotik.notifications')` holds only a destination address/URL,
+never router credentials. The webhook payload carries only fields
+`mikrotik_alerts` already stores (`id`, `status`, `connection`, `metric`,
 `operator`, `threshold`, `value`, `message`, `triggered_at`,
-`resolved_at`) to the configured URL. Delivery is synchronous (no
-queueing) — queue it yourself if you need that.
+`resolved_at`) — never credentials. Delivery is synchronous (no
+queueing); queue it yourself if you need that.
 
-### Monitoring analytics (P8, extended in P10)
+## 11. Analytics
 
-P8 adds read-only history/trend queries over data P4 and P5 already
-store — it makes **no RouterOS requests of its own** and does not change
-`mikrotik_snapshots`/`mikrotik_alerts`/`mikrotik_incidents` in any way.
+`MonitoringAnalytics` is entirely read-only history/trend queries over
+data P4/P5/P10 already store — **it makes no RouterOS requests of its
+own** and never writes to any table:
 
 ```php
 use Easybdit\LaravelMikrotik\Monitoring\MonitoringAnalytics;
@@ -709,305 +613,436 @@ use Easybdit\LaravelMikrotik\Monitoring\MonitoringAnalytics;
 $analytics = app(MonitoringAnalytics::class);
 
 $analytics->resourceTrend('branch-01', 'cpu_load', since: now()->subDay());
-$analytics->healthTrend('branch-01', 'cpu-temperature');
-$analytics->interfaceCounterTrend('branch-01', 'ether1', 'rx_error'); // also covers tx_error/rx_drop/tx_drop
-$analytics->interfaceRateHistory('branch-01', 'ether1', 'rx_byte');
-$analytics->alertHistory('branch-01');
-$analytics->alertCountsByRuleMetric('branch-01');
+// list<array{captured_at: Carbon, value: mixed}>
 
-// P10:
-$analytics->openIncidents('branch-01');              // what's ongoing right now
-$analytics->incidentHistory('branch-01');             // any status, oldest first
-$analytics->incidentCountsByRule('branch-01');        // "which problem recurs most"
-$analytics->averageIncidentDurationSeconds('branch-01'); // resolved incidents only; null if none
+$analytics->healthTrend('branch-01', 'cpu-temperature');
+// same shape, over one health sensor's ->value
+
+$analytics->interfaceCounterTrend('branch-01', 'ether1', 'rx_error');
+// same shape, over one interface counter (rx_error/tx_error/rx_drop/tx_drop/etc.)
+
+$analytics->interfaceRateHistory('branch-01', 'ether1', 'rx_byte');
+// list<array{from: Carbon, to: Carbon, rate_per_second: float|null, counter_reset: bool}>
+// computed between each pair of consecutive stored snapshots — NOT a live
+// RouterOS reading (that's interfaceRate() from section 5).
+// counter_reset=true (rate_per_second=null) instead of a misleading
+// negative number when a reboot reset the counter between snapshots.
+
+$analytics->alertHistory('branch-01');            // Collection<MikrotikAlert>, any status
+$analytics->alertCountsByRuleMetric('branch-01'); // list<array{rule_id, metric, count}>
+
+$analytics->openIncidents('branch-01');              // Collection<MikrotikIncident>, ongoing now
+$analytics->incidentHistory('branch-01');            // Collection<MikrotikIncident>, any status
+$analytics->incidentCountsByRule('branch-01');       // list<array{rule_id, count}>
+$analytics->averageIncidentDurationSeconds('branch-01'); // float|null — resolved incidents only
 ```
 
-`interfaceRateHistory()` computes a per-second rate between each pair of
-consecutive stored snapshots from their already-recorded cumulative
-counters — contrast `RouterConnection::interfaceRate()` (P3), which is
-RouterOS's own live one-shot reading at the moment of the call. A pair
-where the counter decreased (RouterOS resets these on interface reset —
-typically a reboot) is reported as `rate_per_second: null, counter_reset:
-true` rather than a misleading negative number. Every query here filters
-first on the `connection` + `captured_at`/`triggered_at`/`opened_at`
-columns already indexed by the P4/P5/P10 migrations before touching a
-row's JSON columns. `averageIncidentDurationSeconds()` computes the
-average in PHP from `opened_at`/`resolved_at` (the same portable
-approach `interfaceRateHistory()` already uses), not a
-database-specific date-diff function.
+Every method accepts optional `?Carbon $since = null, ?Carbon $until =
+null` to bound the window. Every query filters first on the already-
+indexed `connection` + `captured_at`/`triggered_at`/`opened_at` columns
+before touching a row's JSON columns.
 
-### Why `health()` doesn't return a fixed object
+## 12. Real MikroTik Testing Guide
 
-MikroTik hardware exposes different sensors per board — confirmed
-directly from MikroTik's documentation: a CCR1072-1G-8S+ reports power
-consumption, CPU temperature, four fan speeds, two board temperatures,
-and dual PSU voltage/current; other boards report only `voltage` and
-`temperature`; some legacy boards report numbered sensors like
-`voltage1`..`voltage10`. `health()` therefore returns a `HealthReading`
-— a bag of `HealthSensor` objects keyed by RouterOS's own sensor name.
-Asking for a sensor a device doesn't have returns `null`; it never
-throws.
+`Http::fake()` tests (see [section 13](#13-testing-without-a-real-router))
+prove this package sends the request RouterOS's own documentation says
+it should, and handles the response shape that documentation shows. They
+do **not** prove your specific router, RouterOS version, or user
+permissions actually behave that way. This section is how to verify that
+safely, without risking anything in your network.
 
-## Exception handling
+### Step 1 — Prepare the router
+
+- Create a **dedicated test RouterOS user** rather than reusing `admin`
+  (Winbox/WebFig → **System → Users**). Never share this (or any)
+  password with anyone, including in a bug report to this package.
+- Give it only the policy it needs: **`read`** to try the read
+  capabilities in [section 1](#1-what-this-package-is); additionally
+  **`write`** only if you intend to try `ip()->addresses()` or
+  `interface()`. Don't grant more than that.
+- Confirm **IP → Services → `www-ssl`** is enabled. If your router
+  restricts which IPs may reach a service, make sure the machine running
+  your Laravel app is allowed.
+
+### Step 2 — Configure Laravel
+
+```env
+MIKROTIK_HOST=<your-router-ip>
+MIKROTIK_PORT=443
+MIKROTIK_USERNAME=<your-dedicated-test-user>
+MIKROTIK_PASSWORD=<its-password>
+MIKROTIK_VERIFY_TLS=true
+```
+
+Use placeholders like these in any config you share — never a real
+value.
+
+### Step 3 — Verify read access
+
+Before trying anything else, confirm the basics work:
 
 ```php
-use Easybdit\LaravelMikrotik\Exceptions\AuthenticationException;
-use Easybdit\LaravelMikrotik\Exceptions\ConnectionException;
-use Easybdit\LaravelMikrotik\Exceptions\RouterOsException;
-use Easybdit\LaravelMikrotik\Exceptions\MalformedResponseException;
-use Easybdit\LaravelMikrotik\Exceptions\MikrotikException; // base type
+$router = Mikrotik::connection();
 
-try {
-    $resource = Mikrotik::connection('branch-01')->resource();
-} catch (ConnectionException $e) {
-    // Router unreachable or the request timed out.
-} catch (AuthenticationException $e) {
-    // Router reached; credentials were rejected.
-} catch (RouterOsException $e) {
-    // Router reached, credentials fine, RouterOS itself returned an error.
-    // $e->getRouterOsErrorCode() / $e->getRouterOsDetail() are available.
-} catch (MalformedResponseException $e) {
-    // 2xx response, but not valid/expected JSON.
-} catch (MikrotikException $e) {
-    // Catch-all for any of the above.
-}
+$router->resource();               // should return version/board info
+$router->health();                 // should return whatever sensors your device has
+$router->interfaces();             // should list your device's interfaces
+$router->ip()->addresses()->list(); // should list your device's configured addresses
 ```
 
-## Security
+If any of these throw, see [Troubleshooting](#15-troubleshooting) before
+going further — do not proceed to a write test until reads succeed.
 
-- HTTPS only; TLS certificate verification is **on by default**.
-- Credentials live in your app's own config/`.env` — this package does
-  not add a database table or admin UI for them.
-- P4's `mikrotik_snapshots` table stores only what `resource()`/
-  `health()`/`interfaces()` already return to your application code
-  (board info, sensor readings, interface state/counters) — never
-  connection credentials. It lives in your own application's database,
-  so your normal database access controls apply to it.
-- P5's `mikrotik_rules` and `mikrotik_alerts` tables are the same: rule
-  definitions and alert history you (or your application code) create,
-  derived entirely from data `mikrotik_snapshots` already stores. Neither
-  table stores or references connection credentials.
-- No exception message this package throws ever includes the configured
-  username or password — verified directly by the test suite (see
-  `tests/Feature/SecurityTest.php`).
-- This package's exception chain never retains the underlying Guzzle
-  request object either. A connection failure's root cause is preserved
-  as a plain message (host + failure description), not as the original
-  exception object — which would otherwise carry the full outgoing
-  request, including the `Authorization: Basic ...` header, reachable via
-  `getPrevious()`.
-- The package never logs a request it makes, and in particular never
-  logs the `Authorization` header.
-- P7's `config('mikrotik.notifications')` (mail/webhook) holds only a
-  destination address/URL, never router credentials — the webhook
-  payload (see [Notifications](#notifications-opt-in-p7)) carries the
-  same alert fields `mikrotik_alerts` already stores and nothing else.
-  Both channels are disabled by default.
-- P8's `MonitoringAnalytics` is read-only: it makes no RouterOS request
-  and does not write to any table.
-- P9's `menu()` validates every menu path and item identifier against a
-  strict allow-list (letters/digits/`_`/`-`/`/` for paths; adds `.`/`*`
-  for identifiers) before ever building a request — a path traversal
-  (`..`), an absolute URL, or protocol-like input (`http://...`) is
-  rejected with `InvalidMenuPathException` and never reaches the
-  transport layer at all.
-- `menu()` results are raw RouterOS REST data (the same fields
-  `resource()`/`health()`/`interfaces()` etc. already receive) — never
-  connection credentials, and never logged.
-- P9's retry never retries a `401`/`403`, so enabling it cannot turn a
-  single rejected-credentials attempt into repeated ones, and it adds no
-  new place where the `Authorization` header could be logged/echoed —
-  the same request-building code path (and the same never-log-a-request
-  rule) is reused for every attempt.
-- P10's `mikrotik_incidents` table is the same: it stores only
-  `rule_id`/`connection`/`metric`/status/timestamps derived from
-  `mikrotik_alerts`, which already stores no credentials. Opening an
-  incident is protected by a real database unique index (not an
-  application-level check with a race window), so a duplicate-open
-  attempt fails as a database integrity error, caught and handled by
-  `IncidentManager` — never silently retried, never logged.
-- P11: `timeout` and `retry.times`/`retry.sleep` are clamped to safe
-  bounds (`timeout`: 1–120s; `retry.times`: 0–10; `retry.sleep`:
-  0–30000ms) rather than passed through raw. Guzzle's own documented
-  `timeout` option treats `0` as "wait indefinitely" — a misconfigured
-  `MIKROTIK_TIMEOUT=0` (or an implausibly large value from a bad env
-  var) can no longer hang a request forever or retry hundreds of
-  thousands of times. `verify_tls` still defaults to `true` and is never
-  disabled automatically by any code path.
-- P11: creating an active alert (`RuleEvaluator`) or opening an incident
-  (`IncidentManager`) is now protected by a real database unique index,
-  not just an application-level check-then-create — closing a genuine
-  race between two `mikrotik:monitor` processes evaluating the same
-  rule+connection at nearly the same time. See
-  [Concurrency](#concurrency-p11) below.
-- P12: the new `put()`/`patch()`/`delete()` transport methods reuse the
-  exact same credential-handling and exception-sanitization code path as
-  `get()`/`post()` — no new place exists where a password or the
-  `Authorization` header could leak. Write exceptions reflect only
-  RouterOS's *response*, never the request body sent — tested explicitly
-  since a future phase's request bodies may carry sensitive router-config
-  values (e.g. a PPP secret's password). Writes never use the read-path
-  retry configuration (see
-  [Write transport foundation](#write-transport-foundation-p12-internal-only)
-  above).
-- P13: `ip()->addresses()`'s `find()`/`update()`/`remove()`/`enable()`/
-  `disable()` validate `$id` against the same allow-list `menu()`
-  already uses before building any request — path traversal, an
-  absolute URL, and protocol-like input are all rejected the same way.
-  `add()` validates the required `address` field is present *before*
-  any request is sent. Inherits P12's non-retrying writes and
-  credential/body sanitization unchanged (same `Transport`, same
-  `RestTransport::send()`).
+### Step 4 — Safe write test
 
-## Testing
+**Only attempt this against a resource you are certain is safe to
+change**, and only if you actually need to verify write behavior for
+your use case — most applications only need the read capabilities above.
+
+Pick a **dedicated, clearly unused** test address or a **clearly idle**
+interface (no active link, no production traffic, no IP already
+assigned) — never a production IP, route, or an interface actually
+carrying traffic. Use a documentation-only address for the value itself:
+`203.0.113.99/32` ([RFC 5737](https://www.rfc-editor.org/rfc/rfc5737))
+is reserved for exactly this purpose and is never a real, routable
+address.
+
+Exact lifecycle, confirmed against a real device by this package's own
+test process (RouterOS 7.10.2, RB3011UiAS):
+
+```php
+$addresses = $router->ip()->addresses();
+
+// 1. List existing addresses.
+$before = $addresses->list();
+
+// 2. Confirm no collision with your chosen test value.
+foreach ($before as $a) {
+    if ($a->address === '203.0.113.99/32') {
+        throw new RuntimeException('Already exists — pick a different test value.');
+    }
+}
+
+// 3. Add.
+$created = $addresses->add(['address' => '203.0.113.99/32', 'interface' => 'your-idle-interface']);
+
+// 4. Find/list to confirm it.
+$found = $addresses->find($created->id);
+
+// 5. Update a harmless field.
+$addresses->update($created->id, ['comment' => 'temporary-test-delete-me']);
+
+// 6. Verify the update.
+$addresses->find($created->id)->comment; // should read back what you set
+
+// 7. Disable.
+$addresses->disable($created->id);
+
+// 8. Verify it is actually disabled.
+$addresses->find($created->id)->disabled; // should be true
+
+// 9. Enable.
+$addresses->enable($created->id);
+
+// 10. Verify it is actually enabled.
+$addresses->find($created->id)->disabled; // should be false
+
+// 11. Remove.
+$addresses->remove($created->id);
+
+// 12. Verify it is gone.
+$addresses->list()->contains(fn ($a) => $a->address === '203.0.113.99/32'); // should be false
+```
+
+**Stop immediately** if any step behaves unexpectedly, or if you are not
+completely certain the resource you selected is safe — do not guess, and
+do not continue "to see what happens." A failed or interrupted test
+still needs step 11 (remove) attempted as cleanup — see Step 5.
+
+### Step 5 — Verify cleanup
+
+After any write test (successful or not), always re-run `list()` (or
+`find()`) and confirm no temporary test data remains. If a cleanup step
+failed partway through, remove the leftover test entry manually before
+considering the test finished.
+
+### Step 6 — Never test by changing
+
+Never use this package's write capabilities to change, on a router you
+cannot afford to misconfigure:
+
+- Production IP addresses
+- Routes
+- Firewall rules
+- DHCP configuration
+- PPP/PPPoE configuration
+- Queues
+- WAN interfaces, or any interface actually carrying production traffic
+
+...unless you are working against a dedicated lab router with no
+production role at all.
+
+## 13. Testing Without a Real Router
 
 ```bash
 composer install
 vendor/bin/phpunit
 ```
 
-The test suite uses `Illuminate\Support\Facades\Http::fake()` throughout
-— no physical MikroTik router is required to run it. The base `TestCase`
-also calls `Http::preventStrayRequests()`, so any request that doesn't
-match a registered fake fails the test immediately instead of silently
-making a real network call.
+The test suite uses `Illuminate\Support\Facades\Http::fake()`
+throughout — **no physical MikroTik router is required to run it.**
+`Http::fake()` intercepts every outgoing HTTP request this package would
+make and returns a canned response you specify instead, letting tests
+assert exactly what request was sent (method, URL, body) without a
+network call ever happening. The base `TestCase` also calls
+`Http::preventStrayRequests()`, so any request that doesn't match a
+registered fake fails the test immediately instead of silently making a
+real network call.
 
-CI (`.github/workflows/tests.yml`, P11) runs this suite against every
-combination in [Requirements](#requirements) above on SQLite, plus one
-additional run (PHP 8.4, Laravel 13) against a real MySQL 8 service
-container — this package's migrations are written to be portable across
-both (see `database/migrations/`), not SQLite-only.
+CI (`.github/workflows/tests.yml`) runs this suite against every
+PHP/Laravel combination in [Requirements](#2-requirements) on SQLite,
+plus one additional run against a real MySQL 8 service container — the
+monitoring migrations are written to be portable across both.
+
+**`Http::fake()` tests are not equivalent to real-device verification.**
+They prove this package builds the request RouterOS's documentation says
+it should, and correctly parses the response shape that documentation
+shows — they cannot prove your specific router version or configuration
+actually behaves that way. See
+[Real MikroTik Testing Guide](#12-real-mikrotik-testing-guide) above for
+how this package itself has been verified against a real device, and how
+you can verify your own.
+
+## 14. Production Testing Checklist
+
+Before relying on this package against a production router:
+
+- [ ] RouterOS reachable from the machine running your Laravel app
+- [ ] HTTPS REST (`www-ssl`) service enabled on the router
+- [ ] Correct `MIKROTIK_USERNAME` configured
+- [ ] That user has the correct RouterOS permissions (`read`, plus
+      `write` only if you use `ip()->addresses()`/`interface()`)
+- [ ] `MIKROTIK_VERIFY_TLS` configuration checked and understood (stay
+      `true` unless you have a specific, understood reason not to)
+- [ ] A basic read (`resource()`/`health()`/`interfaces()`) tested
+      successfully against the real router
+- [ ] If you need write capabilities: a safe, clearly-unused test
+      resource selected (never a production one)
+- [ ] The write test lifecycle completed successfully
+- [ ] The temporary test resource confirmed removed
+- [ ] `.env`/credentials confirmed **not** committed to version control
+- [ ] `vendor/bin/phpunit` passes in your own application's environment
+
+## 15. Troubleshooting
+
+| Exception | Meaning | Common cause |
+|---|---|---|
+| `ConnectionException` | The router could not be reached at all. | Wrong host/port, router offline, firewall blocking the connection, or the request timed out (`->timedOut()` — check `MIKROTIK_TIMEOUT`). |
+| `AuthenticationException` | The router was reached, but rejected the credentials (HTTP 401/403). | Wrong `MIKROTIK_USERNAME`/`MIKROTIK_PASSWORD`, or the RouterOS user is disabled. |
+| `RouterOsException` | The router was reached, credentials were fine, but RouterOS itself returned an error for the request. | An invalid value in a write request, a missing required field RouterOS itself requires, a "not found" `.id`, or — commonly for a write — insufficient RouterOS user permissions (`"not enough permissions (9)"` in `$e->getRouterOsDetail()` means the user needs the `write` policy). `$e->getRouterOsErrorCode()`/`$e->getRouterOsDetail()` give RouterOS's own error code/detail. |
+| `MalformedResponseException` | The router returned a 2xx response, but the body wasn't valid/expected JSON. | Usually indicates a RouterOS version difference this package hasn't seen — please report it (without any credentials in the report). |
+| `InvalidConfigurationException` | A problem in *this package's own* configuration, not the router. | An unknown connection name, a connection missing `host`/`username`/`password`, or an unsupported `transport` value (only `'rest'` exists today). |
+| `InvalidRuleException` | A `MikrotikRule` you tried to save is malformed. | An `operator` outside `>`, `>=`, `<`, `<=`, `==`, `!=`, or a `metric` not starting with `resource.`, `health.`, or `interfaces.`. |
+| `InvalidMenuPathException` | A `menu()` path or item identifier failed this package's own safety validation, **before any request was sent**. | A path/identifier containing `..`, a full URL, or a character outside the safe allow-list. |
+| `InvalidResourceException` | A typed write call (`ip()->addresses()->add()`) is missing a field this package requires before it will even send a request. | Calling `add()` without `address`. |
+
+**A note on TLS errors** specifically: they surface as
+`ConnectionException` (the router was not successfully reached over
+HTTPS) — check `MIKROTIK_VERIFY_TLS` and whether the router's
+certificate is trusted, or self-signed and not yet imported into your
+trust store.
+
+No exception this package throws ever includes the configured username
+or password — see [Security](#16-security).
+
+## 16. Security
+
+- Credentials stay in your application's own `.env`/config — this
+  package adds no database table or admin UI for them.
+- **Never commit `.env`** to version control.
+- **Never print, log, or paste a password** — including into a bug
+  report or this package's own tests/documentation. No exception message
+  this package throws ever includes the configured username or password
+  (verified by the test suite), and no request this package makes is
+  ever logged.
+- Writes (`ip()->addresses()`, `interface()`) are **non-retrying** — an
+  ambiguous failure after a write already reached RouterOS is never
+  automatically retried, since that could risk a duplicate `add()` or a
+  reapplied `update()`.
+- Every menu path and item identifier (`menu()`, `ip()->addresses()`,
+  `interface()`) is validated against a strict allow-list before a
+  request is ever built — this is what stops a path-traversal or
+  protocol-like value from ever reaching the router.
+- Always use HTTPS (there is no alternative in this package) and keep
+  TLS certificate verification enabled in production.
+- Use a **least-privilege** RouterOS user: `read`-only unless you
+  specifically need `ip()->addresses()`/`interface()`, in which case add
+  `write` — never hand this package `full`/`admin` access by default.
+- Monitoring's database tables (`mikrotik_snapshots`, `mikrotik_rules`,
+  `mikrotik_alerts`, `mikrotik_incidents`) store only what `resource()`/
+  `health()`/`interfaces()` already return plus rule/alert bookkeeping —
+  never router credentials.
+
+## 17. Architecture Overview
+
+```
+Your Laravel application
+        |
+        v
+Mikrotik facade  ->  ConnectionManager  ->  RouterConnection
+        |                                        |
+        |                                        v
+        |                          Typed RouterOS APIs (resource(),
+        |                          health(), interfaces(), logs(),
+        |                          menu(), ip(), interface(), ...)
+        |                                        |
+        |                                        v
+        |                          ResponseNormalizer (raw JSON -> DTOs)
+        |                                        |
+        |                                        v
+        |                                   Transport (RestTransport)
+        |                                        |
+        |                                        v
+        |                          RouterOS REST API (HTTPS)
+
+Monitoring (all opt-in, built on the above):
+   mikrotik:monitor
+        -> SnapshotRecorder  (calls resource()/health()/interfaces())
+        -> RuleEvaluator     (reads MikrotikRule rows, writes MikrotikAlert rows)
+        -> IncidentManager   (writes MikrotikIncident rows)
+        -> AlertNotifier     (mail/webhook, optional)
+   MonitoringAnalytics reads everything the above already stored.
+```
+
+The pieces you'll actually interact with:
+
+- **`ConnectionManager`** (`Mikrotik::connection('name')`) resolves and
+  caches a named connection from `config('mikrotik.connections')` — the
+  same idiom Laravel's own `config('database.connections')` uses.
+- **`RouterConnection`** is the object you get back — it's the main
+  public API surface of this package; you should rarely need to touch
+  anything below it directly.
+- **`Menu`** is the class behind `menu()` — generic, read-only, path-
+  validated access to any RouterOS menu.
+- **`RestTransport`** is the internal HTTP layer (Laravel's own `Http`
+  client under the hood) — it's what actually issues `GET`/`PUT`/
+  `PATCH`/`DELETE` requests and turns a non-2xx response or a connection
+  failure into the right exception type. You should not need to use it
+  directly.
+- **DTOs** (`RouterResource`, `HealthReading`, `InterfaceCollection`,
+  `IpAddress`, `InterfaceRecord`, etc.) are the typed objects every
+  method returns — see [section 5](#5-first-connection) for why every
+  field on them is nullable.
+- **Monitoring services** (`SnapshotRecorder`, `RuleEvaluator`,
+  `IncidentManager`, `AlertNotifier`, `MonitoringAnalytics`) are plain
+  Laravel-container-resolvable classes (`app(ClassName::class)`), each
+  documented in its own section above.
+
+## 18. Feature Matrix
+
+| Feature | Status | Read | Write | Notes |
+|---|---|---|---|---|
+| `resource()` — system resource | Done | Yes | — | `/system/resource` |
+| `health()` — hardware sensors | Done | Yes | — | `/system/health`; sensor set varies per board |
+| `interfaces()` — interfaces + counters | Done | Yes | — | `/interface`; cumulative counters, not live |
+| `interfaceRate()` — one-shot live rate | Done | Yes | — | `/interface/monitor-traffic ... once` |
+| `logs()` — router logs | Done | Yes | — | `/log`; simple equality filtering only |
+| `menu()` — generic menu access | Done (P9) | Yes | No (deliberate) | Any other RouterOS menu, raw untyped rows, read-only forever |
+| `ip()->addresses()` — IP address mgmt | Done (P13) | Yes | Yes | `list/find/add/update/remove/enable/disable`; real-device verified |
+| `interface()` — interface mgmt | Done (P14) | Yes | Yes (no add/remove) | `list/find/update/enable/disable`; real-device verified |
+| Write transport (`put/patch/delete`) | Done (P12) | — | Internal only | Not directly exposed; foundation for `ip()`/`interface()` |
+| Opt-in retry (reads only) | Done (P9) | — | N/A | Never retries a write; never retries 401/403/4xx |
+| Monitoring snapshots | Done (P4) | Local DB | Local DB only | Stores `resource()`/`health()`/`interfaces()` output; no RouterOS writes |
+| Rules + alert lifecycle | Done (P5) | Local DB | Local DB only | Triggered/resolved lifecycle, deduplicated |
+| Incidents | Done (P10) | Local DB | Local DB only | One incident per one alert episode (no cross-episode grouping yet) |
+| `mikrotik:monitor` command | Done (P6) | Yes (via above) | Local DB only | Not self-scheduling — add to Laravel's scheduler |
+| Notifications (mail/webhook) | Done (P7) | — | External (opt-in) | Disabled by default; synchronous |
+| Analytics (`MonitoringAnalytics`) | Done (P8/P10) | Local DB only | — | No RouterOS requests of its own |
+| Production hardening (CI, concurrency, security) | Done (P11) | — | — | See [Security](#16-security), [Concurrency](#concurrency) |
+| Firewall / DHCP / PPP / Queue / Route / DNS / User management | **Planned** | No | No | See [Roadmap](#19-roadmap) |
+| Binary RouterOS API (port 8728/8729) | **Not planned** | No | No | REST only |
+| Multi-tenant / SaaS features | **Not planned** | — | — | — |
+
+## 19. Roadmap
+
+**P1–P14 are complete** (see [CHANGELOG.md](CHANGELOG.md) for full,
+phase-by-phase history). Tentative order for what's planned next, most
+broadly useful first — **none of this exists yet**; exact scope and
+naming may change once each phase is actually scoped against RouterOS's
+official REST documentation and a real device, per this package's
+standing rule never to guess RouterOS behavior:
+
+- **Planned — IP Firewall Filter management** (`/ip/firewall/filter`)
+- **Planned — DHCP Server / Lease management** (`/ip/dhcp-server`, `/ip/dhcp-server/lease`)
+- **Planned — PPP/PPPoE Secret management** (`/ppp/secret`)
+- **Planned — Simple Queue management** (`/queue/simple`)
+- **Planned — IP Pool / Address Pool management** (`/ip/pool`)
+- **Planned — IP Route management** (`/ip/route`)
+- **Planned — DNS / System management** (`/ip/dns`, relevant `/system/*` write menus)
+- **Planned — User / Scheduler management** (`/user`, `/system/scheduler`)
+- **Planned — Advanced read/query/filter capabilities** (RouterOS's documented `.query`/`~` operators, once independently verified — beyond today's simple `?field=value` equality)
+- **Planned — Batch/concurrent operations and production optimization**
+- **Planned — Final security/API/documentation review**
 
 ## Known limitations
 
 This package intentionally does **not** include:
 
 - Continuous/streaming traffic monitoring — `interfaces()` gives
-  cumulative counters, and `interfaceRate()` gives a one-shot
-  instantaneous reading, but nothing subscribes to a live feed (RouterOS
-  REST has no supported way to do this at all — see
-  [Interfaces and traffic counters](#interfaces-and-traffic-counters) and
-  [One-shot interface rate](#one-shot-interface-rate))
+  cumulative counters and `interfaceRate()` gives a one-shot reading, but
+  nothing subscribes to a live feed (RouterOS REST has no supported way
+  to do this at all)
 - Log filtering beyond simple equality (`?field=value`) — no `~`
   (contains/regex) filtering, no pagination beyond RouterOS's own log
   buffer size
-- DHCP, PPP/PPPoE, firewall, or VPN modules
-- A built-in schedule entry or locking — `mikrotik:monitor` (P6) is a
-  plain artisan command; you register it (and `->withoutOverlapping()`)
-  on Laravel's own scheduler yourself (see
-  [Scheduled monitoring](#scheduled-monitoring-mikrotikmonitor-p6))
+- DHCP, PPP/PPPoE, firewall, or VPN modules (see [Roadmap](#19-roadmap))
+- A built-in schedule entry or locking for `mikrotik:monitor` — you
+  register it (and `->withoutOverlapping()`) on Laravel's own scheduler
+  yourself
 - Any config-file or artisan-command way to define a `MikrotikRule` —
-  create one directly via Eloquent (P5)
-- Cross-rule incident correlation — an incident (P10) groups exactly one
-  rule's own triggered/resolved episode; it does not attempt to relate
-  incidents from *different* rules that might share a root cause
-- Grouping *multiple* alert episodes of the same rule into one incident
-  (e.g. brief flapping in and out of the threshold) — P10 maps one
-  incident to exactly one alert episode; a rule that resolves and
-  re-matches shortly after always opens a new, separate incident, never
-  reopens the previous one (see
-  [Incidents](#incidents-p10-built-on-the-alert-lifecycle))
-- Any framework event (Laravel event/listener) dispatched when a
-  snapshot is recorded, an alert fires, or an incident opens/resolves —
-  P7 added mail/webhook *notifications* specifically (see
-  [Notifications](#notifications-opt-in-p7)), but there is no general
-  `Illuminate\Events` hook yet
-- Notification channels beyond mail/webhook (no Slack, SMS, etc.), and
-  no queueing of notification delivery (P7 is synchronous by design)
-- Any RouterOS configuration menu except `/ip/address` (P13) and
-  `/interface` (P14) — `menu()` (P9) remains GET-only for everything
-  else, and no other typed write resource exists yet (no DHCP/PPP/
-  firewall/VLAN/queue/etc. write API)
-- IP address routes/`/ip/route` and any other `/ip/*` menu — P13
-  implements `ip()->addresses()` only
-- Adding or removing an interface, or any interface subtype menu
-  (`/interface/vlan`, `/interface/bridge`, etc.) — P14's
-  `interface()` implements `/interface` only (list/find/update/enable/
-  disable), deliberately without add()/remove() (see
-  [Interface management](#interface-management-p14))
-- Retry of any kind for write operations — P12's `put()`/`patch()`/
-  `delete()` never retry, and there is no separate "write retry" setting
-  to opt into
-- Filtering beyond simple equality on `menu()->get()` — no RouterOS
-  `.query`/`~`/operator-based filtering or `POST`-based filtering, only
-  the same `?field=value` form `logs()` already uses (see
-  [Generic menu access](#generic-menu-access-p9)); not implemented until
-  independently verified
-- A confirmed not-found behavior for `menu()->find()` — it currently
-  surfaces RouterOS's generic error response (`RouterOsException`)
-  rather than returning `null`, because the exact `GET`-by-id "not
-  found" error shape was not independently confirmed against a live
-  device (see [Generic menu access](#generic-menu-access-p9))
-- Concurrent/batched RouterOS requests (e.g. the binary API's
-  tag-correlated multiplexing over one socket) — REST is one request per
-  response; nothing in this package sends multiple requests at once
-- Distributed locking (P11's concurrency protection is a real database
-  unique index, not a lock — see [Concurrency](#concurrency-p11); two
-  processes racing for the same rule/incident never both succeed, but
-  nothing coordinates processes beyond that)
+  create one directly via Eloquent
+- Cross-rule incident correlation, or grouping *multiple* alert episodes
+  of the same rule into one incident (e.g. brief flapping) — one
+  incident always maps to exactly one alert episode
+- Any framework event (`Illuminate\Events`) dispatched when a snapshot is
+  recorded or an alert/incident changes state — only the explicit P7
+  mail/webhook notifications exist
+- Notification channels beyond mail/webhook, and no queueing of
+  notification delivery (synchronous by design)
+- Any RouterOS configuration menu except `/ip/address` and `/interface` —
+  `menu()` remains read-only for everything else
+- `add()`/`remove()` for interfaces, or any interface subtype menu
+  (`/interface/vlan`, `/interface/bridge`, etc.)
+- `/ip/route` or any other `/ip/*` menu beyond `/ip/address`
+- Retry of any kind for write operations
+- Filtering beyond simple equality on `menu()->get()`
+- A confirmed not-found behavior for `menu()->find()` on a `GET` — it
+  surfaces RouterOS's generic error response rather than returning
+  `null`, since the exact "not found" error shape for `GET` (as opposed
+  to `DELETE`, which is confirmed) was not independently verified
+- Concurrent/batched RouterOS requests — REST is one request per response
+- Distributed locking — the database unique-index protection in
+  [Concurrency](#concurrency) is real database-level protection, not a
+  distributed lock
 - A binary RouterOS API transport (port 8728/8729) — REST only
-- Any AI integration (`easybdit/laravel-mikrotik-ai` is a separate,
-  not-yet-built package; this package has no dependency on
-  `easybdit/laraveleasyai` and never will)
+- Any AI integration — a separate, not-yet-built package, no dependency
+  on it from this one
 - Multi-tenant / SaaS functionality
-- Database-backed router credentials — configuration is `.env`/config
-  file based only
+- Database-backed router credentials — `.env`/config file based only
 
 ### RouterOS permissions
 
-`interfaces()` and `logs()` were verified against MikroTik's public
-documentation only (no live device was available for this package's
-development) and are expected to work with the same RouterOS user
-"read" policy that `resource()`/`health()` already require. This was not
-independently re-confirmed for `/interface` or `/log` specifically —
-if your RouterOS user has a restricted policy set, verify read access to
-these menus against your own device.
+`interfaces()` and `logs()` are expected to work with the same `read`
+policy `resource()`/`health()` already require, but this was not
+independently re-confirmed for those two specifically against a live
+device — if your RouterOS user has a restricted policy set, verify read
+access to these menus yourself. `menu()` is a generic accessor: whatever
+`read` policy your user needs for a given menu is entirely between your
+RouterOS user configuration and that menu.
 
-`menu()` (P9) is a generic accessor: whatever RouterOS "read" policy
-your user needs for a given menu is entirely between your RouterOS user
-configuration and that menu — this package cannot verify permissions
-per menu on your behalf.
-
-`ip()->addresses()` (P13) and `interface()` (P14) additionally require
-the RouterOS user's group to have the **`write`** policy — confirmed
-directly against a real device: a user with only `read` access returns
-`RouterOsException` with RouterOS's own `"not enough permissions (9)"`
-detail on any `add()`/`update()`/`remove()`/`enable()`/`disable()`
-call, before this package can do anything about it.
-
-## Roadmap — next planned phases
-
-P1–P14 are complete (see [Changelog](CHANGELOG.md)). Tentative order
-for what comes next, most broadly useful first; not a commitment to
-exact scope or naming, and subject to revision once each phase is
-actually scoped against the official RouterOS REST documentation:
-
-- **P15 — IP Firewall Filter management** (`/ip/firewall/filter`)
-- **P16 — DHCP Server / Lease management** (`/ip/dhcp-server`,
-  `/ip/dhcp-server/lease`)
-- **P17 — PPP/PPPoE Secret management** (`/ppp/secret`)
-- **P18 — Simple Queue management** (`/queue/simple`)
-- **P19 — IP Pool / Address Pool management** (`/ip/pool`)
-- **P20 — IP Route management** (`/ip/route`)
-- **P21 — DNS / System management** (`/ip/dns`, relevant `/system/*`
-  write menus)
-- **P22 — User / Scheduler management** (`/user`, `/system/scheduler`)
-- **P23 — Advanced read/query/filter capabilities** (beyond simple
-  `?field=value` equality — RouterOS's documented `.query`/`~`
-  operators, once independently verified)
-- **P24 — Batch/concurrent operations and production optimization**
-- **P25 — Final security/API/documentation review**
-
-This list is unchanged from what was proposed going into P14 — nothing
-in P14's implementation (a second typed write resource following P13's
-established shape) surfaced a reason to reorder it. Firewall filter
-management is kept first because it is typically the highest-value,
-most-requested RouterOS write surface after basic IP/interface config,
-and its REST shape (list/find/add/update/remove/enable/disable, list
-filtering, ordering) is expected to closely follow the pattern already
-proven twice now (P13, P14) — but this will still be verified against
-the official documentation and a real device before being assumed, per
-this package's standing rule never to guess RouterOS behavior.
+`ip()->addresses()` and `interface()` additionally require the `write`
+policy — confirmed directly against a real device (see
+[Requirements](#2-requirements)).
 
 ## License
 
