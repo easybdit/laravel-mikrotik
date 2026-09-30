@@ -8,6 +8,7 @@ use Easybdit\LaravelMikrotik\DTO\HealthReading;
 use Easybdit\LaravelMikrotik\DTO\HealthSensor;
 use Easybdit\LaravelMikrotik\DTO\InterfaceCollection;
 use Easybdit\LaravelMikrotik\DTO\InterfaceRate;
+use Easybdit\LaravelMikrotik\DTO\IpAddress;
 use Easybdit\LaravelMikrotik\DTO\LogCollection;
 use Easybdit\LaravelMikrotik\DTO\LogEntry;
 use Easybdit\LaravelMikrotik\DTO\RouterInterface;
@@ -298,6 +299,50 @@ final class ResponseNormalizer
         }
 
         return new LogCollection($entries);
+    }
+
+    /**
+     * Builds a list of IpAddress (P13) from a raw `/ip/address` "print"
+     * (GET) payload — a JSON array of records, the same documented
+     * list-menu shape every other list endpoint already uses.
+     *
+     * @return list<IpAddress>
+     */
+    public function normalizeIpAddresses(array $raw): array
+    {
+        $items = [];
+
+        foreach ($this->asRowList($raw) as $row) {
+            if (is_array($row)) {
+                $items[] = $this->normalizeIpAddress($row);
+            }
+        }
+
+        return $items;
+    }
+
+    /**
+     * Builds one IpAddress (P13) from a raw `/ip/address` row — used for
+     * both a single-item GET/find() and the full-object response
+     * MikroTik's own documentation confirms PUT (add) and PATCH (set)
+     * both return (help.mikrotik.com "REST API").
+     */
+    public function normalizeIpAddress(array $raw): IpAddress
+    {
+        $record = $this->firstRecord($raw);
+
+        return new IpAddress(
+            id: $this->stringOrNull($record, '.id'),
+            address: $this->stringOrNull($record, 'address'),
+            network: $this->stringOrNull($record, 'network'),
+            interface: $this->stringOrNull($record, 'interface'),
+            actualInterface: $this->stringOrNull($record, 'actual-interface'),
+            disabled: $this->boolOrNull($record, 'disabled'),
+            dynamic: $this->boolOrNull($record, 'dynamic'),
+            invalid: $this->boolOrNull($record, 'invalid'),
+            comment: $this->stringOrNull($record, 'comment'),
+            raw: $record,
+        );
     }
 
     /**

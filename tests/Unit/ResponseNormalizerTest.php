@@ -91,4 +91,42 @@ class ResponseNormalizerTest extends TestCase
         $this->assertSame(159176, $rate->rxBitsPerSecond);
         $this->assertSame(227456, $rate->txBitsPerSecond);
     }
+
+    public function test_normalize_ip_address_accepts_a_single_object_not_wrapped_in_a_list(): void
+    {
+        $address = $this->normalizer->normalizeIpAddress([
+            '.id' => '*1', 'address' => '192.168.88.1/24', 'network' => '192.168.88.0',
+            'interface' => 'bridge1', 'actual-interface' => 'bridge1', 'disabled' => 'false',
+            'dynamic' => 'false', 'invalid' => 'false', 'comment' => 'lan',
+        ]);
+
+        $this->assertSame('*1', $address->id);
+        $this->assertSame('192.168.88.1/24', $address->address);
+        $this->assertSame('bridge1', $address->actualInterface);
+        $this->assertFalse($address->disabled);
+        $this->assertFalse($address->dynamic);
+        $this->assertFalse($address->invalid);
+        $this->assertSame('lan', $address->comment);
+    }
+
+    public function test_normalize_ip_addresses_builds_a_list(): void
+    {
+        $addresses = $this->normalizer->normalizeIpAddresses([
+            ['.id' => '*1', 'address' => '192.168.88.1/24'],
+            ['.id' => '*2', 'address' => '10.0.0.1/24'],
+        ]);
+
+        $this->assertCount(2, $addresses);
+        $this->assertSame('*1', $addresses[0]->id);
+        $this->assertSame('*2', $addresses[1]->id);
+    }
+
+    public function test_normalize_ip_address_missing_optional_fields_does_not_throw(): void
+    {
+        $address = $this->normalizer->normalizeIpAddress(['.id' => '*1', 'address' => '1.2.3.4/32']);
+
+        $this->assertNull($address->comment);
+        $this->assertNull($address->disabled);
+        $this->assertSame(['.id' => '*1', 'address' => '1.2.3.4/32'], $address->raw);
+    }
 }

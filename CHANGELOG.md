@@ -2,6 +2,47 @@
 
 All notable changes to `easybdit/laravel-mikrotik` are documented here.
 
+## P13 — IP address management
+
+- Added `RouterConnection::ip(): Resources\IpResource` and
+  `IpResource::addresses(): Resources\IpAddressResource` — a typed,
+  read+write API for RouterOS's `/ip/address` menu, the first resource
+  built on P12's write transport: `list()`, `find()`, `add()`,
+  `update()`, `remove()`, `enable()`, `disable()`. Returns/accepts the
+  new `DTO\IpAddress` (`.id`, `address`, `network`, `interface`,
+  `actual-interface`, `disabled`, `dynamic`, `invalid`, `comment`).
+- Verified against MikroTik's own documented `/ip/address` PUT/PATCH/GET
+  request-response examples (help.mikrotik.com "REST API") — DELETE's
+  documented empty-body-on-success is not `/ip/address`-specific in the
+  docs but is exercised by `remove()`.
+- `enable()`/`disable()` are thin `update()` wrappers PATCHing
+  `disabled` — RouterOS REST has no documented dedicated enable/disable
+  endpoint. **Not independently confirmed against a real device**: the
+  wire format assumed for the boolean `disabled` value
+  (`"true"`/`"false"`, matching GET's own confirmed convention) — flagged
+  in the README as pending real-device verification.
+- Fixed a related transport bug found while implementing `remove()`:
+  `RestTransport::send()` treated a documented empty-body success
+  response (DELETE) as `MalformedResponseException` instead of success
+  — it previously only ever saw non-empty bodies (get()/post()/P12's
+  put()/patch() all return objects). Now returns `[]` for an empty
+  successful body, for any verb.
+- `add()` validates the required `address` field before sending a
+  request (`InvalidResourceException`, new). `find()`/`update()`/
+  `remove()`/`enable()`/`disable()` validate `$id` against the same
+  allow-list `Connection\Menu` already uses (own copy — `Menu` itself is
+  untouched).
+- **Real-device verification: pending, not skipped.** The configured
+  test device (`laravel_13_rnd`) returned a connection timeout (not the
+  previously-observed HTTP 401 credential rejection — a different
+  failure mode, recorded here rather than assumed) when this phase
+  attempted one read-only connectivity check; no write was attempted
+  against it. Verified with `Http::fake()` against official
+  documentation only, per this phase's own stop-and-report rule for an
+  unreachable device.
+- No changes to any P1-P12 public API. 208 tests, 496 assertions (up
+  from 180), composer validate clean, php -l clean.
+
 ## P12 — Write transport foundation (internal only)
 
 - Added `put()`, `patch()`, `delete()` to `Contracts\Transport` and

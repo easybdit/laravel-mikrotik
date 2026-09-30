@@ -197,6 +197,18 @@ class RestTransport implements Transport
             ]);
         }
 
+        // P13: a successful DELETE returns an empty body (confirmed:
+        // help.mikrotik.com "REST API" -- "If the deletion has been
+        // succeeded, the server responds with an empty response"), which
+        // is not valid JSON on its own and must not be treated as
+        // malformed. This is checked before decoding, not just for
+        // delete() specifically, since the same empty-body-on-success
+        // shape could apply to any verb RouterOS chooses to respond to
+        // this way.
+        if ($response->body() === '') {
+            return [];
+        }
+
         $decoded = $this->decodeOrNull($response->body());
 
         if (!is_array($decoded)) {

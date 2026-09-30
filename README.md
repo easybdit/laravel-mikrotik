@@ -2,7 +2,7 @@
 
 A Laravel abstraction for MikroTik RouterOS devices.
 
-**This is P1 through P12 — an intentionally small, incrementally-grown
+**This is P1 through P13 — an intentionally small, incrementally-grown
 release.** It provides connection management and read-only retrieval of
 router resource info, hardware health, interfaces (with cumulative
 traffic counters and a one-shot rate reading), log entries, opt-in
@@ -12,17 +12,17 @@ grouping above that alert lifecycle, a Laravel-scheduler-friendly
 `mikrotik:monitor` command, optional mail/webhook alert notifications,
 read-only history/trend analytics over already-recorded data (including
 incidents), generic read-only RouterOS REST menu access for any menu
-this package doesn't have a named method for, and opt-in HTTP retry —
-all over the RouterOS REST API. P12 additionally adds an internal write
-transport (`PUT`/`PATCH`/`DELETE`) as a foundation for future typed
-write APIs — it is **not** exposed through `menu()` or any public method
-yet (see [Write transport foundation](#write-transport-foundation-p12-internal-only)).
-Everything else — DHCP/PPP/firewall/VPN, any actual write/configuration
-operation, a binary-API transport, router CRUD/management, cross-rule
-incident correlation, and AI-powered diagnosis
-(`easybdit/laravel-mikrotik-ai`, a separate future package) — is **not
-implemented yet**. See [Known limitations](#known-limitations) below for
-the authoritative list.
+this package doesn't have a named method for, opt-in HTTP retry, an
+internal write transport (P12, not directly exposed), and — P13, the
+first thing actually built on that write transport — a typed,
+read+write API for RouterOS's `/ip/address` menu
+(`$router->ip()->addresses()`). Everything else — DHCP/PPP/firewall/VPN,
+every other RouterOS configuration menu, a binary-API transport, router
+CRUD/management, cross-rule incident correlation, and AI-powered
+diagnosis (`easybdit/laravel-mikrotik-ai`, a separate future package) —
+is **not implemented yet**. See
+[Known limitations](#known-limitations) below for the authoritative
+list.
 
 ## Requirements
 
@@ -279,12 +279,10 @@ already cover.*
 
 P12 adds `put()`/`patch()`/`delete()` to this package's internal
 `Transport` contract — RouterOS REST's documented `add`/`set`/`remove`
-verbs. **Nothing public calls these yet**: `menu()` remains exactly as
-described above (GET-only), and no typed write API exists before a
-future phase. This is transport-layer plumbing only, verified with
-`Http::fake()` (exact method/path/body, error mapping, credential and
-request-body sanitization) — not yet exercised against a real device,
-since nothing exposes it.
+verbs. `menu()` remains exactly as described above (GET-only) and
+always will; write access is only ever exposed through explicit, typed
+resource methods like `ip()->addresses()` below (P13) — never through
+`menu()`.
 
 Write requests **never** use the read-path retry configuration
 (`connections.*.retry`, see [Retry](#retry-opt-in-p9) below), regardless
@@ -292,6 +290,55 @@ of how it's set — an ambiguous failure (timeout, dropped connection)
 after a write already reached RouterOS cannot be safely retried without
 risking a duplicate "add" or a reapplied "set"/"remove". Write retry is
 not implemented at all in this phase.
+
+### IP address management (P13)
+
+The first typed resource built on the P12 write transport —
+`$router->ip()->addresses()` maps to RouterOS's `/ip/address` menu:
+
+```php
+use Easybdit\LaravelMikrotik\Exceptions\RouterOsException;
+
+$addresses = $router->ip()->addresses();
+
+$addresses->list();                                  // Collection<DTO\IpAddress>
+$addresses->list(['interface' => 'bridge1']);         // simple equality filter, same form as logs()/menu()
+$addresses->find('*1');                               // DTO\IpAddress, by ".id" or name
+
+$created = $addresses->add([
+    'address'   => '192.168.88.1/24',
+    'interface' => 'bridge1',
+]);                                                    // throws InvalidResourceException if 'address' is missing
+
+$addresses->update($created->id, ['comment' => 'lan']);
+$addresses->disable($created->id);                    // PATCH {"disabled": "true"}
+$addresses->enable($created->id);                     // PATCH {"disabled": "false"}
+$addresses->remove($created->id);                     // DELETE — RouterOS's documented empty-body success
+```
+
+`add()`/`update()` return the full `DTO\IpAddress` RouterOS's own
+documented response already includes (`.id`, `address`, `network`,
+`interface`, `actual-interface`, `disabled`, `dynamic`, `invalid`,
+`comment` — anything else stays in `->raw`). `enable()`/`disable()` are
+thin wrappers around `update()`'s documented ability to PATCH any
+field — RouterOS REST has no separate documented enable/disable
+endpoint. Every `$id` (`find()`/`update()`/`remove()`/`enable()`/
+`disable()`) is validated against the same safe-identifier allow-list
+`menu()` already uses, so this cannot be used to escape the `/rest/`
+API root either. Every RouterOS-side failure (400/404/etc.) surfaces as
+the existing `RouterOsException`, exactly like every other method in
+this package.
+
+**Real-device verification: pending.** This phase is verified with
+`Http::fake()` against MikroTik's own documented request/response
+examples (`help.mikrotik.com` "REST API") only — the configured test
+device was unreachable (connection timeout) when this phase was built.
+One specific detail is unconfirmed pending a real device: whether a
+boolean field like `disabled` must be sent as the string `"true"`/
+`"false"` (this package's assumption, matching what GET already
+confirmed RouterOS returns) or the classic console `"yes"`/`"no"` —
+`enable()`/`disable()` should be verified against a real device before
+relying on them in production.
 
 ### Retry (opt-in, P9)
 
@@ -739,6 +786,14 @@ try {
   retry configuration (see
   [Write transport foundation](#write-transport-foundation-p12-internal-only)
   above).
+- P13: `ip()->addresses()`'s `find()`/`update()`/`remove()`/`enable()`/
+  `disable()` validate `$id` against the same allow-list `menu()`
+  already uses before building any request — path traversal, an
+  absolute URL, and protocol-like input are all rejected the same way.
+  `add()` validates the required `address` field is present *before*
+  any request is sent. Inherits P12's non-retrying writes and
+  credential/body sanitization unchanged (same `Transport`, same
+  `RestTransport::send()`).
 
 ## Testing
 
@@ -795,10 +850,16 @@ This package intentionally does **not** include:
   `Illuminate\Events` hook yet
 - Notification channels beyond mail/webhook (no Slack, SMS, etc.), and
   no queueing of notification delivery (P7 is synchronous by design)
-- Any way to change RouterOS's own configuration — `menu()` (P9) is
-  GET-only, no public API calls the P12 write transport, and there is no
-  `add()`/`set()`/`remove()`/`enable()`/`disable()` on anything yet (see
-  [Write transport foundation](#write-transport-foundation-p12-internal-only))
+- Any RouterOS configuration menu except `/ip/address` (P13) — `menu()`
+  (P9) remains GET-only for everything else, and no other typed write
+  resource exists yet (no DHCP/PPP/firewall/VLAN/queue/etc. write API)
+- Real-device confirmation of `enable()`/`disable()`'s wire format for
+  the `disabled` field (`"true"`/`"false"` assumed, matching GET's own
+  confirmed convention, but not independently verified for a write body
+  — the configured test device was unreachable when P13 was built; see
+  [IP address management](#ip-address-management-p13))
+- IP address routes/`/ip/route` and any other `/ip/*` menu — P13
+  implements `ip()->addresses()` only
 - Retry of any kind for write operations — P12's `put()`/`patch()`/
   `delete()` never retry, and there is no separate "write retry" setting
   to opt into

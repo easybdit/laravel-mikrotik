@@ -10,6 +10,7 @@ use Easybdit\LaravelMikrotik\DTO\InterfaceCollection;
 use Easybdit\LaravelMikrotik\DTO\InterfaceRate;
 use Easybdit\LaravelMikrotik\DTO\LogCollection;
 use Easybdit\LaravelMikrotik\DTO\RouterResource;
+use Easybdit\LaravelMikrotik\Resources\IpResource;
 use Easybdit\LaravelMikrotik\Support\ResponseNormalizer;
 
 /**
@@ -109,5 +110,17 @@ final class RouterConnection
     public function menu(string $path): Menu
     {
         return new Menu($this->transport, $path);
+    }
+
+    /**
+     * Typed, read+write access to RouterOS's `/ip/*` menus (P13 —
+     * currently `ip()->addresses()` only, mapping to `/ip/address`; see
+     * Resources\IpResource). Uses P12's write transport
+     * (put()/patch()/delete()) directly — this is unrelated to menu()
+     * above, which remains GET-only.
+     */
+    public function ip(): IpResource
+    {
+        return new IpResource($this->transport, $this->normalizer);
     }
 }
