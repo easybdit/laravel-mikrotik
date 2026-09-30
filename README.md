@@ -348,6 +348,62 @@ final `list()` confirming complete cleanup. **This confirmed the
 No production address, firewall, DHCP, PPP, routing, or other
 interface configuration was touched.
 
+### Interface management (P14)
+
+A second typed resource on the P12 write transport, alongside P13's
+`ip()` — `$router->interface()` maps to RouterOS's `/interface` menu.
+Deliberately named singular ("interface", not "interfaces") to avoid
+any confusion with the pre-existing, unrelated, read-only
+`$router->interfaces()` (cumulative traffic counters, keyed by name,
+unchanged by this phase):
+
+```php
+use Easybdit\LaravelMikrotik\Exceptions\RouterOsException;
+
+$iface = $router->interface();
+
+$iface->list();                              // Collection<DTO\InterfaceRecord>
+$iface->list(['type' => 'ether']);           // simple equality filter, same form as ip()->addresses()->list()
+$iface->find('ether7');                      // DTO\InterfaceRecord, by name or ".id"
+
+$iface->update('ether7', ['comment' => 'uplink']);
+$iface->disable('ether7');                   // PATCH {"disabled": "true"}
+$iface->enable('ether7');                    // PATCH {"disabled": "false"}
+```
+
+`update()` returns the `DTO\InterfaceRecord` RouterOS's response
+includes (`.id`, `name`, `type`, `running`, `disabled`, `comment` —
+anything else stays in `->raw`; the fuller counter set already exposed
+by `interfaces()`/`DTO\RouterInterface` is not duplicated here).
+`enable()`/`disable()` are thin `update()` wrappers, the same
+convention P13 uses. Every `$id` (`find()`/`update()`/`enable()`/
+`disable()`) is validated against the same safe-identifier allow-list
+`menu()`/`ip()->addresses()` already use.
+
+**No `add()`/`remove()`.** MikroTik's own REST documentation does not
+confirm PUT/DELETE support for `/interface`, and RouterOS itself does
+not generally support creating/destroying a physical interface through
+this generic menu (only specific virtual-interface submenus like
+`/interface/vlan` do) — this package does not invent behavior it has
+no documented or observed basis for.
+
+**Real-device verification: complete.** Verified with `Http::fake()`
+against the same documentation conventions confirmed for P13 (the
+documented `/interface` GET example addresses an item by name in the
+URL, and PATCH's `{"field": "value"}` body contract is documented as
+menu-agnostic), and additionally against the same live RouterOS
+**7.10.2** device (board **RB3011UiAS**) used for P13. Using the idle,
+link-down `ether7` (no address assigned, confirmed via P13's own
+verification pass): `list()`/`find()` by name, `disable()` then
+`enable()` with `find()` confirming RouterOS's actual state after each
+— **confirming the `disabled` field's write wire format is `"true"`/
+`"false"` for `/interface` too** — then `update()` of the `comment`
+field with `find()` confirming it, followed by restoring the original
+comment exactly and a final `find()` confirming the interface's state
+matched its pre-test baseline. No production interface, IP address,
+routing, firewall, DHCP, or PPP/PPPoE configuration was touched, and
+the router was never rebooted.
+
 ### Retry (opt-in, P9)
 
 Every connection can opt into retrying a request that failed for a
@@ -858,11 +914,17 @@ This package intentionally does **not** include:
   `Illuminate\Events` hook yet
 - Notification channels beyond mail/webhook (no Slack, SMS, etc.), and
   no queueing of notification delivery (P7 is synchronous by design)
-- Any RouterOS configuration menu except `/ip/address` (P13) — `menu()`
-  (P9) remains GET-only for everything else, and no other typed write
-  resource exists yet (no DHCP/PPP/firewall/VLAN/queue/etc. write API)
+- Any RouterOS configuration menu except `/ip/address` (P13) and
+  `/interface` (P14) — `menu()` (P9) remains GET-only for everything
+  else, and no other typed write resource exists yet (no DHCP/PPP/
+  firewall/VLAN/queue/etc. write API)
 - IP address routes/`/ip/route` and any other `/ip/*` menu — P13
   implements `ip()->addresses()` only
+- Adding or removing an interface, or any interface subtype menu
+  (`/interface/vlan`, `/interface/bridge`, etc.) — P14's
+  `interface()` implements `/interface` only (list/find/update/enable/
+  disable), deliberately without add()/remove() (see
+  [Interface management](#interface-management-p14))
 - Retry of any kind for write operations — P12's `put()`/`patch()`/
   `delete()` never retry, and there is no separate "write retry" setting
   to opt into
@@ -905,6 +967,47 @@ these menus against your own device.
 your user needs for a given menu is entirely between your RouterOS user
 configuration and that menu — this package cannot verify permissions
 per menu on your behalf.
+
+`ip()->addresses()` (P13) and `interface()` (P14) additionally require
+the RouterOS user's group to have the **`write`** policy — confirmed
+directly against a real device: a user with only `read` access returns
+`RouterOsException` with RouterOS's own `"not enough permissions (9)"`
+detail on any `add()`/`update()`/`remove()`/`enable()`/`disable()`
+call, before this package can do anything about it.
+
+## Roadmap — next planned phases
+
+P1–P14 are complete (see [Changelog](CHANGELOG.md)). Tentative order
+for what comes next, most broadly useful first; not a commitment to
+exact scope or naming, and subject to revision once each phase is
+actually scoped against the official RouterOS REST documentation:
+
+- **P15 — IP Firewall Filter management** (`/ip/firewall/filter`)
+- **P16 — DHCP Server / Lease management** (`/ip/dhcp-server`,
+  `/ip/dhcp-server/lease`)
+- **P17 — PPP/PPPoE Secret management** (`/ppp/secret`)
+- **P18 — Simple Queue management** (`/queue/simple`)
+- **P19 — IP Pool / Address Pool management** (`/ip/pool`)
+- **P20 — IP Route management** (`/ip/route`)
+- **P21 — DNS / System management** (`/ip/dns`, relevant `/system/*`
+  write menus)
+- **P22 — User / Scheduler management** (`/user`, `/system/scheduler`)
+- **P23 — Advanced read/query/filter capabilities** (beyond simple
+  `?field=value` equality — RouterOS's documented `.query`/`~`
+  operators, once independently verified)
+- **P24 — Batch/concurrent operations and production optimization**
+- **P25 — Final security/API/documentation review**
+
+This list is unchanged from what was proposed going into P14 — nothing
+in P14's implementation (a second typed write resource following P13's
+established shape) surfaced a reason to reorder it. Firewall filter
+management is kept first because it is typically the highest-value,
+most-requested RouterOS write surface after basic IP/interface config,
+and its REST shape (list/find/add/update/remove/enable/disable, list
+filtering, ordering) is expected to closely follow the pattern already
+proven twice now (P13, P14) — but this will still be verified against
+the official documentation and a real device before being assumed, per
+this package's standing rule never to guess RouterOS behavior.
 
 ## License
 

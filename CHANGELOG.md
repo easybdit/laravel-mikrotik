@@ -2,6 +2,47 @@
 
 All notable changes to `easybdit/laravel-mikrotik` are documented here.
 
+## P14 — Interface management
+
+- Added `RouterConnection::interface(): Resources\InterfaceResource` —
+  a typed, read+write API for RouterOS's `/interface` menu, following
+  P13's `IpAddressResource` shape: `list()`, `find()`, `update()`,
+  `enable()`, `disable()`. Returns the new `DTO\InterfaceRecord`
+  (`.id`, `name`, `type`, `running`, `disabled`, `comment`). Deliberately
+  named singular (`interface()`) to avoid any collision with the
+  pre-existing, unrelated, read-only `interfaces()` (P1, cumulative
+  traffic counters keyed by name) — that method and its
+  `DTO\RouterInterface`/`InterfaceCollection` are unchanged.
+- No `add()`/`remove()`: MikroTik's documentation does not confirm
+  PUT/DELETE support for `/interface`, and RouterOS itself does not
+  generally support creating/destroying a physical interface through
+  this generic menu — not implemented, per this phase's "do not invent
+  behavior" scope.
+- `$id` (`find()`/`update()`/`enable()`/`disable()`) accepts either a
+  RouterOS `.id` or the interface's own name (confirmed against a real
+  device — RouterOS's own documented `/interface` GET example
+  addresses an item by name), validated against the same
+  identifier allow-list `Connection\Menu`/P13's `IpAddressResource`
+  already use (own copy, same independence convention P13 established).
+- **Real-device verification: complete.** Against the same live
+  RouterOS **7.10.2** (RB3011UiAS) device used for P13's final
+  verification, using the idle, link-down `ether7` (confirmed via
+  P13's own pass to have no address assigned): `list()`/`find()` by
+  name, `disable()` then `enable()` with `find()` confirming RouterOS's
+  actual state after each — confirming the `disabled` field's write
+  wire format is `"true"`/`"false"` for `/interface` too — then
+  `update()` of the `comment` field, verified, then restored to its
+  original value (`"Lan"`), with a final `find()` confirming the
+  interface's state matched its pre-test baseline exactly. No
+  production interface, IP address, routing, firewall, DHCP, or
+  PPP/PPPoE configuration was touched, and the router was never
+  rebooted. Along the way, confirmed that both P13's and P14's write
+  resources require the RouterOS user's group to have the `write`
+  policy — a read-only user gets `RouterOsException` with RouterOS's
+  own `"not enough permissions (9)"` detail.
+- No changes to any P1-P13 public API. 234 tests, 543 assertions (up
+  from 208/496), composer validate clean, php -l clean.
+
 ## P13 — IP address management
 
 - Added `RouterConnection::ip(): Resources\IpResource` and

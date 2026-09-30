@@ -8,6 +8,7 @@ use Easybdit\LaravelMikrotik\DTO\HealthReading;
 use Easybdit\LaravelMikrotik\DTO\HealthSensor;
 use Easybdit\LaravelMikrotik\DTO\InterfaceCollection;
 use Easybdit\LaravelMikrotik\DTO\InterfaceRate;
+use Easybdit\LaravelMikrotik\DTO\InterfaceRecord;
 use Easybdit\LaravelMikrotik\DTO\IpAddress;
 use Easybdit\LaravelMikrotik\DTO\LogCollection;
 use Easybdit\LaravelMikrotik\DTO\LogEntry;
@@ -340,6 +341,46 @@ final class ResponseNormalizer
             disabled: $this->boolOrNull($record, 'disabled'),
             dynamic: $this->boolOrNull($record, 'dynamic'),
             invalid: $this->boolOrNull($record, 'invalid'),
+            comment: $this->stringOrNull($record, 'comment'),
+            raw: $record,
+        );
+    }
+
+    /**
+     * Builds a list of InterfaceRecord (P14) from a raw `/interface`
+     * "print" (GET) payload — the same documented list-menu shape every
+     * other list endpoint already uses.
+     *
+     * @return list<InterfaceRecord>
+     */
+    public function normalizeInterfaceRecords(array $raw): array
+    {
+        $items = [];
+
+        foreach ($this->asRowList($raw) as $row) {
+            if (is_array($row)) {
+                $items[] = $this->normalizeInterfaceRecord($row);
+            }
+        }
+
+        return $items;
+    }
+
+    /**
+     * Builds one InterfaceRecord (P14) from a raw `/interface` row —
+     * used for a single-item GET/find() and the object PATCH (set)
+     * returns, following the same convention normalizeIpAddress() uses.
+     */
+    public function normalizeInterfaceRecord(array $raw): InterfaceRecord
+    {
+        $record = $this->firstRecord($raw);
+
+        return new InterfaceRecord(
+            id: $this->stringOrNull($record, '.id'),
+            name: $this->stringOrNull($record, 'name'),
+            type: $this->stringOrNull($record, 'type'),
+            running: $this->boolOrNull($record, 'running'),
+            disabled: $this->boolOrNull($record, 'disabled'),
             comment: $this->stringOrNull($record, 'comment'),
             raw: $record,
         );

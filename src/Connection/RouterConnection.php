@@ -10,6 +10,7 @@ use Easybdit\LaravelMikrotik\DTO\InterfaceCollection;
 use Easybdit\LaravelMikrotik\DTO\InterfaceRate;
 use Easybdit\LaravelMikrotik\DTO\LogCollection;
 use Easybdit\LaravelMikrotik\DTO\RouterResource;
+use Easybdit\LaravelMikrotik\Resources\InterfaceResource;
 use Easybdit\LaravelMikrotik\Resources\IpResource;
 use Easybdit\LaravelMikrotik\Support\ResponseNormalizer;
 
@@ -122,5 +123,18 @@ final class RouterConnection
     public function ip(): IpResource
     {
         return new IpResource($this->transport, $this->normalizer);
+    }
+
+    /**
+     * Typed, read+write access to RouterOS's `/interface` menu (P14):
+     * list()/find()/update()/enable()/disable(). Deliberately named
+     * singular ("interface", not "interfaces") to avoid any confusion
+     * with interfaces() above, which is unrelated, unchanged, and
+     * remains read-only — this uses P12's write transport directly, the
+     * same relationship ip() has with menu().
+     */
+    public function interface(): InterfaceResource
+    {
+        return new InterfaceResource($this->transport, $this->normalizer);
     }
 }

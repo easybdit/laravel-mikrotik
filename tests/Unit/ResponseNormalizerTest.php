@@ -129,4 +129,40 @@ class ResponseNormalizerTest extends TestCase
         $this->assertNull($address->disabled);
         $this->assertSame(['.id' => '*1', 'address' => '1.2.3.4/32'], $address->raw);
     }
+
+    public function test_normalize_interface_record_accepts_a_single_object_not_wrapped_in_a_list(): void
+    {
+        $interface = $this->normalizer->normalizeInterfaceRecord([
+            '.id' => '*7', 'name' => 'ether7', 'type' => 'ether',
+            'running' => 'false', 'disabled' => 'false', 'comment' => 'idle test port',
+        ]);
+
+        $this->assertSame('*7', $interface->id);
+        $this->assertSame('ether7', $interface->name);
+        $this->assertSame('ether', $interface->type);
+        $this->assertFalse($interface->running);
+        $this->assertFalse($interface->disabled);
+        $this->assertSame('idle test port', $interface->comment);
+    }
+
+    public function test_normalize_interface_records_builds_a_list(): void
+    {
+        $interfaces = $this->normalizer->normalizeInterfaceRecords([
+            ['.id' => '*1', 'name' => 'ether1'],
+            ['.id' => '*7', 'name' => 'ether7'],
+        ]);
+
+        $this->assertCount(2, $interfaces);
+        $this->assertSame('*1', $interfaces[0]->id);
+        $this->assertSame('*7', $interfaces[1]->id);
+    }
+
+    public function test_normalize_interface_record_missing_optional_fields_does_not_throw(): void
+    {
+        $interface = $this->normalizer->normalizeInterfaceRecord(['.id' => '*7', 'name' => 'ether7']);
+
+        $this->assertNull($interface->comment);
+        $this->assertNull($interface->disabled);
+        $this->assertSame(['.id' => '*7', 'name' => 'ether7'], $interface->raw);
+    }
 }
