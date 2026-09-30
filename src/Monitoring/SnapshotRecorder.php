@@ -10,10 +10,13 @@ use Illuminate\Support\Carbon;
 
 /**
  * Captures a named connection's current resource/health/interface state
- * (via RouterConnection::resource()/health()/interfaces() — the same
- * P1-P3 REST calls those methods already make) and persists it as one
- * MikrotikSnapshot row. Purely additive: it does not change those
- * methods' behavior or signatures, and nothing in P1-P3 depends on it.
+ * (via RouterConnection::pollAll() since P24 — the same P1-P3 REST
+ * calls resource()/health()/interfaces() already make, now issued
+ * concurrently instead of sequentially, see pollAll()'s docblock) and
+ * persists it as one MikrotikSnapshot row. Purely additive: it does not
+ * change resource()/health()/interfaces()' own behavior or signatures,
+ * and record()'s own return value/behavior is unchanged by the P24
+ * change — only how the underlying HTTP requests are issued.
  *
  * Requires this package's "mikrotik-migrations" to have been published
  * and run — an application that never does so is unaffected by this
@@ -31,16 +34,14 @@ final class SnapshotRecorder
     {
         $connection = $this->connections->connection($connectionName);
 
-        $resource = $connection->resource();
-        $health = $connection->health();
-        $interfaces = $connection->interfaces();
+        $data = $connection->pollAll();
 
         return MikrotikSnapshot::query()->create([
             'connection'  => $connection->name(),
             'captured_at' => Carbon::now(),
-            'resource'    => $resource->toArray(),
-            'health'      => $health->toArray(),
-            'interfaces'  => $interfaces->toArray(),
+            'resource'    => $data['resource']->toArray(),
+            'health'      => $data['health']->toArray(),
+            'interfaces'  => $data['interfaces']->toArray(),
         ]);
     }
 }

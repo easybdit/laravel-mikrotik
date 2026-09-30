@@ -106,6 +106,13 @@ class MonitorCommandTest extends TestCase
             'branch.test/rest/system/resource' => function () {
                 throw new \RuntimeException('unexpected failure unrelated to MikroTik');
             },
+            // P24: pollAll() fetches resource/health/interfaces
+            // concurrently, so these two must have a fake response too
+            // (previously, sequential execution never reached them,
+            // since resource() always threw first) -- their success is
+            // irrelevant to this test, only resource()'s failure is.
+            'branch.test/rest/system/health' => Http::response([], 200),
+            'branch.test/rest/interface'     => Http::response([], 200),
         ]);
 
         $this->artisan('mikrotik:monitor')

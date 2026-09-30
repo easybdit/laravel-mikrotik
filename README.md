@@ -7,11 +7,14 @@ change its configuration, plus optional database-backed monitoring
 (snapshots, threshold alerts, incidents, notifications) built on top of
 the same reads.
 
-**Current release: P1 through P21.** Everything documented below is
-implemented, tested, and — where marked — verified against a real
-RouterOS device. Nothing in this README describes a feature that does
-not exist yet; planned future work is listed separately in
-[Roadmap](#roadmap) and marked **Planned**, never as available today.
+**Current release: P1 through P21, plus P23-P25.** Everything
+documented below is implemented, tested, and — where marked — verified
+against a real RouterOS device. Nothing in this README describes a
+feature that does not exist yet; planned future work is listed
+separately in [Roadmap](#19-roadmap) and marked **Planned**, never as
+available today. (P22 — user/scheduler management — was intentionally
+skipped in favor of P23-P25's query/performance/release-hardening work
+and remains **Planned**; see [Roadmap](#19-roadmap).)
 
 ## 1. What this package is
 
@@ -342,6 +345,42 @@ $item = $router->menu('interface')->find('ether1');
   allow-list before a request is ever sent — a path traversal (`..`), an
   absolute URL, or protocol-like input (`http://...`) throws
   `InvalidMenuPathException` immediately, without reaching the router.
+
+### Advanced query/filtering (P23)
+
+`get()`'s simple `?field=value` filtering can only express "AND" —
+every condition must match. For anything `get()` can't express (like
+"OR"), or to limit which fields RouterOS returns, `query()` uses
+RouterOS REST's own documented `.query`/`.proplist` mechanism:
+
+```php
+// OR: everything that's type=ether OR type=bridge --
+// confirmed against a real device: 11 ether + 1 bridge = 12 rows.
+$router->menu('interface')->query(['type=ether', 'type=bridge', '#|']);
+
+// Limit which fields come back (smaller/faster response):
+$router->menu('ip/address')->query(['dynamic=true'], proplist: ['.id', 'address']);
+
+// proplist alone, no filter:
+$router->menu('interface')->query(proplist: ['name', 'type']);
+```
+
+- `$words` is RouterOS's own `.query` "query stack", sent verbatim: a
+  list of `"field=value"` conditions and, where you need it, a stack
+  operator RouterOS itself documents. **Only `"#|"` (OR) is confirmed**
+  — directly against a real device, across two different menus. This
+  package does not invent or validate RouterOS's own query-stack syntax
+  beyond what is confirmed; comparison operators (`>`, `<`), `NOT`, and
+  `~` (contains/regex) are **not** confirmed and are passed through
+  unvalidated at your own risk — an unsupported word surfaces as
+  `RouterOsException`.
+- `$proplist` limits which fields RouterOS returns. **Confirmed to work
+  through `query()`'s `POST` form; confirmed *not* to work as a plain
+  `GET` query-string parameter** — tested directly against a real
+  device, a `GET .../ip/address?.proplist=...` attempt returned a list
+  of *empty* objects. This is exactly why `$proplist` is only offered
+  through `query()`, never added to `get()`.
+- `get()`/`find()` are completely unchanged by this.
 
 ## 7. IP Address Management
 
@@ -683,6 +722,16 @@ $snapshot->resource;    // array, same shape as RouterResource::toArray()
 $snapshot->health;      // array keyed by sensor name
 $snapshot->interfaces;  // array keyed by interface name
 ```
+
+**P24 performance note**: `record()` fetches `resource()`/`health()`/
+`interfaces()` **concurrently** (via `RouterConnection::pollAll()`),
+not sequentially — measured directly against a real device: ~440-565ms
+concurrent vs. ~1000-1250ms sequential for the same three reads
+(roughly half the latency, bounded by whichever of the three is
+slowest). `record()`'s own behavior/return value is unchanged by this —
+it is purely an internal performance improvement, and it fully respects
+your connection's own `retry.times`/`retry.sleep` configuration (see
+[Basic Configuration](#4-basic-configuration)) if you have one set.
 
 Then, to tie snapshot-recording and rule-evaluation together on a
 schedule, run (or schedule) the artisan command:
@@ -1158,7 +1207,8 @@ Mikrotik facade  ->  ConnectionManager  ->  RouterConnection
 
 Monitoring (all opt-in, built on the above):
    mikrotik:monitor
-        -> SnapshotRecorder  (calls resource()/health()/interfaces())
+        -> SnapshotRecorder  (calls RouterConnection::pollAll(), P24 --
+                               resource()/health()/interfaces() concurrently)
         -> RuleEvaluator     (reads MikrotikRule rows, writes MikrotikAlert rows)
         -> IncidentManager   (writes MikrotikIncident rows)
         -> AlertNotifier     (mail/webhook, optional)
@@ -1182,7 +1232,9 @@ The pieces you'll actually interact with:
   non-retrying `POST`, used only by the two singleton settings resources
   (`dns()`/`systemIdentity()`) whose `set` command is invoked via `POST`
   rather than `PATCH` — see [section 7i](#7i-dns--system-identity-p21).
-  You should not need to use `RestTransport` directly.
+  `getMany()` (P24) fetches several reads concurrently via
+  `Http::pool()`, used by `RouterConnection::pollAll()`. You should not
+  need to use `RestTransport` directly.
 - **DTOs** (`RouterResource`, `HealthReading`, `InterfaceCollection`,
   `IpAddress`, `InterfaceRecord`, `FirewallFilterRule`, `DhcpServer`,
   `DhcpLease`, `PppSecret`, `SimpleQueue`, `IpPool`, `IpRoute`,
@@ -1204,6 +1256,7 @@ The pieces you'll actually interact with:
 | `interfaceRate()` — one-shot live rate | Done | Yes | — | `/interface/monitor-traffic ... once` |
 | `logs()` — router logs | Done | Yes | — | `/log`; simple equality filtering only |
 | `menu()` — generic menu access | Done (P9) | Yes | No (deliberate) | Any other RouterOS menu, raw untyped rows, read-only forever |
+| `menu()->query()` — advanced query/proplist | Done (P23) | Yes | No | `.query`/`.proplist` POST mechanism; only equality + `"#|"` (OR) confirmed; real-device verified across 2 menus |
 | `ip()->addresses()` — IP address mgmt | Done (P13) | Yes | Yes | `list/find/add/update/remove/enable/disable`; real-device verified |
 | `interface()` — interface mgmt | Done (P14) | Yes | Yes (no add/remove) | `list/find/update/enable/disable`; real-device verified |
 | `firewall()->filter()` — firewall filter mgmt | Done (P15) | Yes | Yes | Full CRUD + enable/disable; real-device verified |
@@ -1223,26 +1276,34 @@ The pieces you'll actually interact with:
 | Notifications (mail/webhook) | Done (P7) | — | External (opt-in) | Disabled by default; synchronous |
 | Analytics (`MonitoringAnalytics`) | Done (P8/P10) | Local DB only | — | No RouterOS requests of its own |
 | Production hardening (CI, concurrency, security) | Done (P11) | — | — | See [Security](#16-security), [Concurrency](#concurrency) |
-| User / Scheduler / advanced filtering / batch ops | **Planned** | No | No | See [Roadmap](#19-roadmap) |
+| `RouterConnection::pollAll()` — concurrent reads | Done (P24) | Yes | — | `resource()+health()+interfaces()` via `Http::pool()`; ~2x faster, real-device measured |
+| Final security/API/release audit | Done (P25) | — | — | Full repo security sweep, API consistency review, final real-device sweep |
+| User / Scheduler management | **Planned** | No | No | P22 — deliberately not yet implemented; see [Roadmap](#19-roadmap) |
 | Binary RouterOS API (port 8728/8729) | **Not planned** | No | No | REST only |
 | Multi-tenant / SaaS features | **Not planned** | — | — | — |
 
 ## 19. Roadmap
 
-**P1–P21 are complete** (see [CHANGELOG.md](CHANGELOG.md) for full,
-phase-by-phase history) — including firewall filter, DHCP, PPP/PPPoE
-secret, simple queue, IP pool, IP route, and DNS/system identity
-management, all real-device verified except `dns()->update()` (see
-[section 7i](#7i-dns--system-identity-p21)). Tentative order for what's
-planned next — **none of this exists yet**; exact scope and naming may
-change once each phase is actually scoped against RouterOS's official
-REST documentation and a real device, per this package's standing rule
-never to guess RouterOS behavior:
+**P1–P21 are complete, and P23–P25 are complete** (see
+[CHANGELOG.md](CHANGELOG.md) for full, phase-by-phase history) —
+including firewall filter, DHCP, PPP/PPPoE secret, simple queue, IP
+pool, IP route, and DNS/system identity management (all real-device
+verified except `dns()->update()` — see
+[section 7i](#7i-dns--system-identity-p21)), advanced `menu()->query()`
+filtering, concurrent reads (`pollAll()`), and a final production
+security/API audit. This package is considered stable as of this
+release (see [License](#license) for the tag/version).
+
+**P22 — User/Scheduler management was deliberately skipped** in this
+cycle in favor of P23-P25's query/performance/release-hardening work,
+and remains planned:
 
 - **Planned — P22: User / Scheduler management** (`/user`, `/system/scheduler`)
-- **Planned — P23: Advanced read/query/filter capabilities** (RouterOS's documented `.query`/`~` operators, once independently verified — beyond today's simple `?field=value` equality)
-- **Planned — P24: Batch/concurrent operations and production optimization**
-- **Planned — P25: Final security/API/documentation review**
+
+Beyond P22, nothing further is currently planned. Any future addition
+will still be scoped against RouterOS's official REST documentation and
+a real device first, per this package's standing rule never to guess
+RouterOS behavior.
 
 ## Known limitations
 
@@ -1285,12 +1346,21 @@ This package intentionally does **not** include:
   is functionally significant, not harmless); see
   [section 7i](#7i-dns--system-identity-p21)
 - Retry of any kind for write operations
-- Filtering beyond simple equality on `menu()->get()`
+- Filtering beyond simple equality on `menu()->get()` — `menu()->query()`
+  (P23) adds `.query`/`.proplist`, but only equality conditions and the
+  `"#|"` (OR) stack operator are confirmed; comparison operators (`>`,
+  `<`), `NOT`, and `~` (contains/regex) are not confirmed and are not
+  validated
 - A confirmed not-found behavior for `menu()->find()` on a `GET` — it
   surfaces RouterOS's generic error response rather than returning
   `null`, since the exact "not found" error shape for `GET` (as opposed
   to `DELETE`, which is confirmed) was not independently verified
-- Concurrent/batched RouterOS requests — REST is one request per response
+- Concurrent/batched *write* requests, or concurrent reads *across
+  multiple connections/routers* — `pollAll()` (P24) concurrently fetches
+  three reads *for one connection*; `mikrotik:monitor` still processes
+  multiple configured connections one at a time, to preserve its
+  existing per-connection error isolation (one bad router doesn't stop
+  the others)
 - Distributed locking — the database unique-index protection in
   [Concurrency](#concurrency) is real database-level protection, not a
   distributed lock
@@ -1299,6 +1369,8 @@ This package intentionally does **not** include:
   on it from this one
 - Multi-tenant / SaaS functionality
 - Database-backed router credentials — `.env`/config file based only
+- User/scheduler management (P22) — deliberately not yet implemented;
+  see [Roadmap](#19-roadmap)
 
 ### RouterOS permissions
 
@@ -1316,6 +1388,41 @@ Every typed write resource (`ip()->addresses()`, `interface()`,
 `systemIdentity()`) additionally requires the `write` policy —
 confirmed directly against a real device (see
 [Requirements](#2-requirements)).
+
+## Production recommendations
+
+A short checklist beyond the per-topic guidance already in this README:
+
+- **Least privilege first.** Give the RouterOS user this package
+  connects as only `read`, and add `write` only if your application
+  actually calls one of the typed write resources — see
+  [RouterOS permissions](#routeros-permissions) above.
+- **Keep `MIKROTIK_VERIFY_TLS=true`** unless you have a specific,
+  understood reason not to — see [Requirements](#2-requirements).
+- **Set a realistic `MIKROTIK_TIMEOUT`** for your network — this
+  package clamps it to 1-120s, but the right value within that range
+  depends on your own router's typical response time (this package's
+  own real-device measurements: ~270-680ms per individual read call).
+- **Enable retry (`MIKROTIK_RETRY_TIMES`) only for reads you can afford
+  to repeat** — it never applies to a write, by design (see
+  [Security](#16-security)), and it fully applies to `menu()->query()`
+  and `pollAll()` (P23/P24) the same way it already applies to every
+  other read.
+- **Schedule `mikrotik:monitor` with `->withoutOverlapping()`** (see
+  [Monitoring](#8-monitoring)) rather than running it more frequently
+  than a run typically completes.
+- **Treat `ip()->routes()` and `ppp()->secrets()` with extra care** —
+  see their own sections
+  ([7h](#7h-ip-route-management-p20), [7e](#7e-ppppppoe-secret-management-p17))
+  before using either in production.
+- **Run the [Real MikroTik Testing Guide](#12-real-mikrotik-testing-guide)
+  against your own device** before depending on any write capability in
+  production — this package's own real-device verification proves its
+  implementation is correct against the specific device it was tested
+  on, not against yours.
+- **Never commit `.env`**, and treat any PPP secret password the same
+  way — see [Security](#16-security) and
+  [PPP/PPPoE secret management](#7e-ppppppoe-secret-management-p17).
 
 ## License
 

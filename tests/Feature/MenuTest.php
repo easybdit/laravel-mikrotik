@@ -203,4 +203,103 @@ class MenuTest extends TestCase
 
         $this->assertTrue($rows->isEmpty());
     }
+
+    public function test_query_sends_post_to_the_print_path_with_the_query_stack(): void
+    {
+        Http::fake(['router.test/rest/interface/print' => Http::response([
+            ['name' => 'ether1', 'type' => 'ether'],
+        ], 200)]);
+
+        $rows = Mikrotik::connection()->menu('interface')->query(['type=ether', 'type=bridge', '#|']);
+
+        $this->assertInstanceOf(Collection::class, $rows);
+        $this->assertCount(1, $rows);
+
+        Http::assertSent(function ($r) {
+            return $r->method() === 'POST'
+                && $r->url() === 'https://router.test/rest/interface/print'
+                && $r['.query'] === ['type=ether', 'type=bridge', '#|'];
+        });
+    }
+
+    public function test_query_sends_proplist_alongside_the_query_stack(): void
+    {
+        Http::fake(['router.test/rest/ip/address/print' => Http::response([
+            ['.id' => '*1', 'address' => '192.168.88.1/24'],
+        ], 200)]);
+
+        Mikrotik::connection()->menu('ip/address')->query(['dynamic=true'], ['.id', 'address']);
+
+        Http::assertSent(function ($r) {
+            return $r['.query'] === ['dynamic=true']
+                && $r['.proplist'] === ['.id', 'address'];
+        });
+    }
+
+    public function test_query_with_only_a_proplist_omits_the_query_key(): void
+    {
+        Http::fake(['router.test/rest/ip/address/print' => Http::response([], 200)]);
+
+        Mikrotik::connection()->menu('ip/address')->query([], ['name']);
+
+        Http::assertSent(function ($r) {
+            return !array_key_exists('.query', $r->data())
+                && $r['.proplist'] === ['name'];
+        });
+    }
+
+    public function test_query_with_no_arguments_sends_an_empty_body(): void
+    {
+        Http::fake(['router.test/rest/interface/print' => Http::response([], 200)]);
+
+        Mikrotik::connection()->menu('interface')->query();
+
+        Http::assertSent(function ($r) {
+            return $r->method() === 'POST'
+                && $r->url() === 'https://router.test/rest/interface/print'
+                && $r->data() === [];
+        });
+    }
+
+    public function test_query_error_response_throws_router_os_exception(): void
+    {
+        Http::fake(['router.test/rest/interface/print' => Http::response(
+            ['error' => 400, 'message' => 'Bad Request', 'detail' => 'bad query word'],
+            400
+        )]);
+
+        $this->expectException(RouterOsException::class);
+
+        Mikrotik::connection()->menu('interface')->query(['not-a-valid-word']);
+    }
+
+    public function test_query_uses_the_same_read_retry_configuration_as_get(): void
+    {
+        config()->set('mikrotik.connections.default.retry', ['times' => 3, 'sleep' => 0]);
+
+        $attempts = 0;
+        Http::fake(['router.test/rest/interface/print' => function () use (&$attempts) {
+            $attempts++;
+
+            return Http::response(['message' => 'Internal Server Error'], 500);
+        }]);
+
+        try {
+            Mikrotik::connection()->menu('interface')->query(['type=ether']);
+        } catch (RouterOsException) {
+        }
+
+        $this->assertSame(3, $attempts, 'query() is a read (POST-print), so it should retry like get()/post() already do');
+    }
+
+    public function test_query_results_never_contain_the_configured_password(): void
+    {
+        Http::fake(['router.test/rest/interface/print' => Http::response([
+            ['name' => 'ether1', 'comment' => 'not the password'],
+        ], 200)]);
+
+        $rows = Mikrotik::connection()->menu('interface')->query(['type=ether']);
+
+        $this->assertStringNotContainsString(self::PASSWORD, json_encode($rows->all()));
+    }
 }

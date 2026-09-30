@@ -53,6 +53,28 @@ interface Transport
     public function post(string $path, array $body = []): array;
 
     /**
+     * Fetches multiple read-only paths concurrently (P24), for reducing
+     * total wall-clock time when several independent reads are needed
+     * together (e.g. RouterConnection::pollAll()) — measured directly
+     * against a real device to roughly halve total latency for three
+     * such reads versus issuing them sequentially. Every result is
+     * mapped through the same exception logic get() already uses; a
+     * failure on any one request throws immediately (the same
+     * all-or-nothing contract get() already has for a single request).
+     * Supports the same opt-in retry configuration get()/post() already
+     * have.
+     *
+     * @param array<string, array{path: string, query?: array<string, scalar>}> $requests Keyed by a caller-chosen name.
+     * @return array<string, array<string|int, mixed>> Decoded response bodies, keyed the same way as $requests.
+     *
+     * @throws ConnectionException        Router unreachable / timed out.
+     * @throws AuthenticationException    Credentials rejected.
+     * @throws RouterOsException          RouterOS returned an error.
+     * @throws MalformedResponseException Response could not be parsed.
+     */
+    public function getMany(array $requests): array;
+
+    /**
      * Create a new record (maps to RouterOS's "add"). $path has no
      * identifier in it; RouterOS assigns one and includes it in the
      * response (source: help.mikrotik.com "REST API" — PUT = add).

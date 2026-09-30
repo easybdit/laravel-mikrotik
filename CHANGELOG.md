@@ -2,6 +2,72 @@
 
 All notable changes to `easybdit/laravel-mikrotik` are documented here.
 
+## P23-P25 — Advanced query, concurrent reads, final production audit
+
+**P23 — advanced query/filtering (`menu()`).** Added `Menu::query(array
+$words = [], array $proplist = [])`, RouterOS REST's documented
+`.query`/`.proplist` POST mechanism, for filtering `get()`'s simple
+`?field=value` equality can't express and for limiting returned fields.
+Confirmed directly against a real device across two menus
+(`/interface`, `/ip/firewall/filter`): the `"#|"` stack operator
+correctly ORs two conditions (`type=ether #| type=bridge` returned
+11+1=12 rows, matching each condition's individual count exactly), and
+`.proplist` correctly limits fields via POST — **but is confirmed
+broken via a plain GET query-string parameter** (returned a list of
+empty objects on a real device; not offered that way for this reason).
+Comparison operators (`>`, `<`), `NOT`, and `~` (contains/regex) are
+**not** confirmed and are not validated/special-cased — an unsupported
+word surfaces as `RouterOsException`, like any RouterOS-side rejection.
+`get()`/`find()` are completely unchanged. Uses `Transport::post()` (a
+non-write "print" command, the same mechanism `interfaceRate()` already
+uses), so `query()` retains the same opt-in read retry configuration
+every other read already has, and never touches the write transport.
+
+**P24 — concurrent reads (`RouterConnection::pollAll()`).** Added
+`Transport::getMany()`/`RestTransport::getMany()`, fetching multiple
+read-only paths concurrently via Laravel's `Http::pool()`.
+`SnapshotRecorder::record()` (previously three sequential `resource()`/
+`health()`/`interfaces()` calls) now uses
+`RouterConnection::pollAll()`, built on `getMany()` — **measured
+directly against a real device**: sequential took ~1000-1250ms total;
+concurrent took ~440-565ms (bounded by `interfaces()`, the slowest of
+the three) — roughly halving latency. `record()`'s own signature/
+behavior/return value is completely unchanged; only how the underlying
+HTTP requests are issued. `getMany()` fully supports the same opt-in
+retry configuration `get()`/`post()` already have (each pooled request
+retries independently under the same conditions), so enabling retry
+does not silently stop applying here. A bug was found and fixed during
+implementation: Laravel's `Http::pool()` returns *any* exception a
+pooled request raised in place of a `Response` (not only a connection
+failure) — the initial implementation only checked for
+`Illuminate\Http\Client\ConnectionException` and would have thrown a
+`TypeError` for any other pooled failure; fixed to mirror `send()`'s
+existing behavior exactly (only a connection failure is converted,
+everything else propagates unmodified). Real-device verified for
+correct per-connection result association (two connection names
+against the same device both returned identical, correctly-isolated
+data). Cross-connection pooling (multiple *routers* polled at once)
+was considered but not implemented — it would require restructuring
+`MonitorCommand`'s existing, valuable per-connection error isolation
+(one bad router doesn't stop the others), which was judged not worth
+the added risk for this cycle.
+
+**P25 — final production audit.** Full repository security review
+(credential/secret leakage, PPP secret handling, request-body leakage,
+path/ID injection, mass-assignment, write-retry safety, TLS defaults)
+found no new issues beyond the P24 `getMany()` bug above, already
+fixed. API consistency, DTO/raw conventions, and database
+indexes/constraints (migrations, concurrency) were reviewed and found
+already consistent with prior phases — no changes needed. Full test
+suite: 355 tests, 754 assertions (up from 347/738), zero skipped. Final
+real-device sweep: every read-only capability (`resource()`, `health()`,
+`interfaces()`, `logs()`, `menu()`/`menu()->query()`, `ip()->addresses()`,
+`interface()`, `firewall()->filter()`, `dhcp()->servers()`/`leases()`,
+`ppp()->secrets()`, `queue()->simple()`, `ip()->pools()`/`routes()`,
+`dns()`, `systemIdentity()`, `pollAll()`) confirmed working end to end
+against the real device (RouterOS 7.10.2, RB3011UiAS); no write was
+performed, no production configuration was touched.
+
 ## P15-P21 — Firewall filter, DHCP, PPP secrets, simple queue, IP pool, IP route, DNS + system identity
 
 Seven typed resources added in one implementation cycle, all following
