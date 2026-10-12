@@ -2,9 +2,9 @@
 
 All notable changes to `easybdit/laravel-mikrotik` are documented here.
 
-## Unreleased — P22, P23/P24 follow-ups, P25 release readiness
+## 2.0.0 — P22, P23/P24 follow-ups, P25 release readiness
 
-**Compatibility / breaking-ish changes (read before upgrading from 1.0.0):**
+**Compatibility / breaking-ish changes (read before upgrading from 1.0.0; this is a major release):**
 
 - **Supported versions narrowed to Laravel 12/13, PHP 8.2+.** Composer
   refuses every released Laravel 10.x and 11.x version because of
