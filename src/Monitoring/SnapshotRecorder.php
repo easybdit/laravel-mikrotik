@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Easybdit\LaravelMikrotik\Monitoring;
 
 use Easybdit\LaravelMikrotik\Connection\ConnectionManager;
+use Easybdit\LaravelMikrotik\Exceptions\MikrotikException;
 use Easybdit\LaravelMikrotik\Models\MikrotikSnapshot;
 use Illuminate\Support\Carbon;
 
@@ -43,5 +44,34 @@ final class SnapshotRecorder
             'health'      => $data['health']->toArray(),
             'interfaces'  => $data['interfaces']->toArray(),
         ]);
+    }
+
+    /**
+     * P24: records a snapshot for each of $names (default: every
+     * configured connection), one router at a time. A router that fails
+     * to poll yields its MikrotikException in the result instead of a
+     * snapshot, and never prevents the others from being recorded.
+     * Database errors are not caught.
+     *
+     * @param list<string>|null $names
+     * @return array<string, MikrotikSnapshot|MikrotikException>
+     */
+    public function recordMany(?array $names = null): array
+    {
+        $results = [];
+
+        foreach ($this->connections->pollMany($names) as $name => $poll) {
+            $results[$name] = $poll->ok()
+                ? MikrotikSnapshot::query()->create([
+                    'connection'  => $name,
+                    'captured_at' => Carbon::now(),
+                    'resource'    => $poll->data['resource']->toArray(),
+                    'health'      => $poll->data['health']->toArray(),
+                    'interfaces'  => $poll->data['interfaces']->toArray(),
+                ])
+                : $poll->error;
+        }
+
+        return $results;
     }
 }

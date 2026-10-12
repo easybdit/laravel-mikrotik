@@ -3,16 +3,27 @@
     "description": "A Laravel abstraction for MikroTik RouterOS devices: connection management, router resource and hardware-health retrieval over the RouterOS REST API.",
     "type": "library",
     "license": "MIT",
+    "homepage": "https://github.com/easybdit/laravel-mikrotik",
+    "authors": [
+        {
+            "name": "Md Murad Hosen",
+            "email": "muradbd.info@gmail.com"
+        }
+    ],
+    "support": {
+        "issues": "https://github.com/easybdit/laravel-mikrotik/issues",
+        "source": "https://github.com/easybdit/laravel-mikrotik"
+    },
     "keywords": ["laravel", "mikrotik", "routeros", "network", "monitoring"],
     "require": {
-        "php": "^8.1|^8.2|^8.3|^8.4",
-        "illuminate/support": "^10.0|^11.0|^12.0|^13.0",
-        "illuminate/http": "^10.0|^11.0|^12.0|^13.0",
-        "illuminate/contracts": "^10.0|^11.0|^12.0|^13.0",
-        "illuminate/database": "^10.0|^11.0|^12.0|^13.0"
+        "php": "^8.2|^8.3|^8.4",
+        "illuminate/support": "^12.0|^13.0",
+        "illuminate/http": "^12.0|^13.0",
+        "illuminate/contracts": "^12.0|^13.0",
+        "illuminate/database": "^12.0|^13.0"
     },
     "require-dev": {
-        "orchestra/testbench": "^8.0|^9.0|^10.0|^11.0",
+        "orchestra/testbench": "^10.0|^11.0",
         "phpunit/phpunit": "^10.0|^11.0"
     },
     "autoload": {

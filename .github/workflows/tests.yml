@@ -6,11 +6,12 @@ on:
   pull_request:
 
 jobs:
-  # composer.json is the single source of truth for "what does this
-  # package claim to support" -- every combination below was individually
-  # verified resolvable with `composer require --dry-run -W` (see
-  # CHANGELOG.md, P11) before being added; a PHP/testbench pair that
-  # Composer cannot actually install is never listed here.
+  # Supported matrix = composer.json: Laravel 12 (Testbench ^10) and
+  # Laravel 13 (Testbench ^11). Laravel 10 and 11 are intentionally NOT
+  # listed: every released 10.x and 11.x version is flagged by Composer
+  # security advisories (the matrix cells for them failed to resolve in
+  # CI), and this package does not weaken `composer audit` blocking to
+  # work around that.
   test:
     name: PHP ${{ matrix.php }} / Testbench ${{ matrix.testbench }}
     runs-on: ubuntu-latest
@@ -18,22 +19,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # testbench ^8.0 -> Laravel 10, needs PHP 8.1+
-          - php: '8.1'
-            testbench: '^8.0'
-          - php: '8.2'
-            testbench: '^8.0'
-          - php: '8.3'
-            testbench: '^8.0'
-          - php: '8.4'
-            testbench: '^8.0'
-          # testbench ^9.0 -> Laravel 11, needs PHP 8.2+
-          - php: '8.2'
-            testbench: '^9.0'
-          - php: '8.3'
-            testbench: '^9.0'
-          - php: '8.4'
-            testbench: '^9.0'
           # testbench ^10.0 -> Laravel 12, needs PHP 8.2+
           - php: '8.2'
             testbench: '^10.0'
@@ -138,7 +123,7 @@ jobs:
         run: composer install --prefer-dist --no-interaction
 
       - name: Validate composer.json/composer.lock
-        run: composer validate --no-check-publish
+        run: composer validate --strict --no-check-publish
 
       - name: PHP syntax check
         run: |

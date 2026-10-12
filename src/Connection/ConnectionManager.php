@@ -4,7 +4,9 @@ declare(strict_types=1);
 
 namespace Easybdit\LaravelMikrotik\Connection;
 
+use Easybdit\LaravelMikrotik\DTO\PollResult;
 use Easybdit\LaravelMikrotik\Exceptions\InvalidConfigurationException;
+use Easybdit\LaravelMikrotik\Exceptions\MikrotikException;
 use Easybdit\LaravelMikrotik\Support\ResponseNormalizer;
 use Easybdit\LaravelMikrotik\Transport\RestTransport;
 use Illuminate\Contracts\Config\Repository as ConfigRepository;
@@ -36,6 +38,49 @@ final class ConnectionManager
         $name ??= $this->getDefaultConnectionName();
 
         return $this->resolved[$name] ??= $this->makeConnection($name);
+    }
+
+    /**
+     * Names of every connection defined under config('mikrotik.connections').
+     *
+     * @return list<string>
+     */
+    public function connectionNames(): array
+    {
+        $connections = $this->config->get('mikrotik.connections', []);
+
+        return is_array($connections) ? array_map('strval', array_keys($connections)) : [];
+    }
+
+    /**
+     * P24: reads several routers one after another (each router's own
+     * three reads are still concurrent, see RouterConnection::pollAll()).
+     * Concurrency is deliberately bounded at one router at a time: each
+     * router already fans out three requests, and polling routers in
+     * parallel would need a cross-transport request pool this package's
+     * Transport contract does not have. Results are keyed and ordered
+     * exactly like $names (duplicates collapsed, first occurrence wins);
+     * omit $names to poll every configured connection. A
+     * MikrotikException from one router (unreachable, auth rejected,
+     * unknown/misconfigured connection, ...) is captured in that
+     * router's PollResult and never stops the others.
+     *
+     * @param list<string>|null $names
+     * @return array<string, PollResult>
+     */
+    public function pollMany(?array $names = null): array
+    {
+        $results = [];
+
+        foreach (array_unique($names ?? $this->connectionNames()) as $name) {
+            try {
+                $results[$name] = new PollResult($name, $this->connection($name)->pollAll(), null);
+            } catch (MikrotikException $e) {
+                $results[$name] = new PollResult($name, null, $e);
+            }
+        }
+
+        return $results;
     }
 
     public function getDefaultConnectionName(): string
@@ -89,7 +134,7 @@ final class ConnectionManager
             retrySleepMilliseconds: self::clamp((int) ($retry['sleep'] ?? 0), min: 0, max: 30000),
         );
 
-        return new RouterConnection($name, $transport, new ResponseNormalizer());
+        return new RouterConnection($name, $transport, new ResponseNormalizer(), (string) $config['username']);
     }
 
     private static function clamp(int $value, int $min, int $max): int
