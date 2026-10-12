@@ -21,6 +21,8 @@ use Easybdit\LaravelMikrotik\DTO\LogEntry;
 use Easybdit\LaravelMikrotik\DTO\PppSecret;
 use Easybdit\LaravelMikrotik\DTO\RouterInterface;
 use Easybdit\LaravelMikrotik\DTO\RouterResource;
+use Easybdit\LaravelMikrotik\DTO\RouterUser;
+use Easybdit\LaravelMikrotik\DTO\SchedulerEntry;
 use Easybdit\LaravelMikrotik\DTO\SimpleQueue;
 use Easybdit\LaravelMikrotik\DTO\SystemIdentity;
 
@@ -538,6 +540,70 @@ final class ResponseNormalizer
         );
     }
 
+    /** Builds a list of RouterUser (P22) from a raw `/user` "print" payload. Credential fields are stripped. @return list<RouterUser> */
+    public function normalizeRouterUsers(array $raw): array
+    {
+        $items = [];
+        foreach ($this->asRowList($raw) as $row) {
+            if (is_array($row)) {
+                $items[] = $this->normalizeRouterUser($row);
+            }
+        }
+
+        return $items;
+    }
+
+    /** Builds one RouterUser (P22) from a raw `/user` row; see SecretRedactor for what is stripped. */
+    public function normalizeRouterUser(array $raw): RouterUser
+    {
+        $record = SecretRedactor::redact($this->firstRecord($raw));
+
+        return new RouterUser(
+            id: $this->stringOrNull($record, '.id'),
+            name: $this->stringOrNull($record, 'name'),
+            group: $this->stringOrNull($record, 'group'),
+            address: $this->stringOrNull($record, 'address'),
+            lastLoggedIn: $this->stringOrNull($record, 'last-logged-in'),
+            disabled: $this->boolOrNull($record, 'disabled'),
+            comment: $this->stringOrNull($record, 'comment'),
+            raw: $record,
+        );
+    }
+
+    /** Builds a list of SchedulerEntry (P22) from a raw `/system/scheduler` "print" payload. @return list<SchedulerEntry> */
+    public function normalizeSchedulerEntries(array $raw): array
+    {
+        $items = [];
+        foreach ($this->asRowList($raw) as $row) {
+            if (is_array($row)) {
+                $items[] = $this->normalizeSchedulerEntry($row);
+            }
+        }
+
+        return $items;
+    }
+
+    /** Builds one SchedulerEntry (P22) from a raw `/system/scheduler` row. */
+    public function normalizeSchedulerEntry(array $raw): SchedulerEntry
+    {
+        $record = $this->firstRecord($raw);
+
+        return new SchedulerEntry(
+            id: $this->stringOrNull($record, '.id'),
+            name: $this->stringOrNull($record, 'name'),
+            startDate: $this->stringOrNull($record, 'start-date'),
+            startTime: $this->stringOrNull($record, 'start-time'),
+            interval: $this->stringOrNull($record, 'interval'),
+            onEvent: $this->stringOrNull($record, 'on-event'),
+            owner: $this->stringOrNull($record, 'owner'),
+            runCount: $this->intOrNull($record, 'run-count'),
+            nextRun: $this->stringOrNull($record, 'next-run'),
+            disabled: $this->boolOrNull($record, 'disabled'),
+            comment: $this->stringOrNull($record, 'comment'),
+            raw: $record,
+        );
+    }
+
     /** Builds a list of SimpleQueue (P18) from a raw `/queue/simple` "print" payload. @return list<SimpleQueue> */
     public function normalizeSimpleQueues(array $raw): array
     {
@@ -678,10 +744,10 @@ final class ResponseNormalizer
         if ($this->isList($raw)) {
             $first = $raw[0] ?? [];
 
-            return is_array($first) ? $first : [];
+            return is_array($first) ? SecretRedactor::redact($first) : [];
         }
 
-        return $raw;
+        return SecretRedactor::redact($raw);
     }
 
     private function allRowsHaveName(array $rows): bool

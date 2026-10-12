@@ -8,6 +8,7 @@ use Easybdit\LaravelMikrotik\Contracts\Transport;
 use Easybdit\LaravelMikrotik\DTO\IpRoute;
 use Easybdit\LaravelMikrotik\Exceptions\InvalidMenuPathException;
 use Easybdit\LaravelMikrotik\Exceptions\InvalidResourceException;
+use Easybdit\LaravelMikrotik\Exceptions\UnsafeOperationException;
 use Easybdit\LaravelMikrotik\Support\ResponseNormalizer;
 use Illuminate\Support\Collection;
 
@@ -66,19 +67,41 @@ final class IpRouteResource
         );
     }
 
-    /** @param array<string, scalar> $attributes */
-    public function update(string $id, array $attributes): IpRoute
+    /**
+     * P25: an update that disables a route or changes its dst-address is
+     * refused for a default route (0.0.0.0/0) unless $allowDefaultRoute
+     * is true. Other updates (e.g. changing the gateway or comment) are
+     * unguarded and cost no extra read.
+     *
+     * @param array<string, scalar> $attributes
+     * @throws UnsafeOperationException
+     */
+    public function update(string $id, array $attributes, bool $allowDefaultRoute = false): IpRoute
     {
         $id = self::assertValidIdentifier($id);
+        \Easybdit\LaravelMikrotik\Support\AttributeValidator::assertSafe($attributes, self::class);
+
+        if (!$allowDefaultRoute && (self::isTruthy($attributes['disabled'] ?? false) || array_key_exists('dst-address', $attributes))) {
+            $this->guardDefaultRoute($id, 'modify', false);
+        }
 
         return $this->normalizer->normalizeIpRoute(
             $this->transport->patch(self::PATH . '/' . $id, $this->wireAttributes($attributes))
         );
     }
 
-    public function remove(string $id): void
+    /**
+     * P25 safeguard: the route is looked up first (one extra read; the
+     * write itself is still never retried) and a default route
+     * (dst-address 0.0.0.0/0) is refused unless $allowDefaultRoute is true.
+     *
+     * @throws UnsafeOperationException The route is a default route and $allowDefaultRoute is false.
+     */
+    public function remove(string $id, bool $allowDefaultRoute = false): void
     {
         $id = self::assertValidIdentifier($id);
+
+        $this->guardDefaultRoute($id, 'delete', $allowDefaultRoute);
 
         $this->transport->delete(self::PATH . '/' . $id);
     }
@@ -88,14 +111,35 @@ final class IpRouteResource
         return $this->update($id, ['disabled' => false]);
     }
 
-    public function disable(string $id): IpRoute
+    /** @throws UnsafeOperationException The route is a default route and $allowDefaultRoute is false. */
+    public function disable(string $id, bool $allowDefaultRoute = false): IpRoute
     {
-        return $this->update($id, ['disabled' => true]);
+        $this->guardDefaultRoute(self::assertValidIdentifier($id), 'disable', $allowDefaultRoute);
+
+        return $this->update($id, ['disabled' => true], allowDefaultRoute: true);
+    }
+
+    private static function isTruthy(mixed $value): bool
+    {
+        return $value === true || (is_string($value) && in_array(strtolower($value), ['true', 'yes'], true));
+    }
+
+    private function guardDefaultRoute(string $id, string $action, bool $allowDefaultRoute): void
+    {
+        if ($allowDefaultRoute) {
+            return;
+        }
+
+        if ($this->find($id)->dstAddress === '0.0.0.0/0') {
+            throw UnsafeOperationException::defaultRoute($action, $id);
+        }
     }
 
     /** @param array<string, scalar> $attributes @return array<string, scalar> */
     private function wireAttributes(array $attributes): array
     {
+        \Easybdit\LaravelMikrotik\Support\AttributeValidator::assertSafe($attributes, self::class);
+
         foreach ($attributes as $key => $value) {
             if (is_bool($value)) {
                 $attributes[$key] = $value ? 'true' : 'false';

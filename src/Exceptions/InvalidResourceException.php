@@ -17,4 +17,9 @@ class InvalidResourceException extends MikrotikException
     {
         return new self("Creating a MikroTik {$resource} requires the '{$field}' field.");
     }
+
+    public static function invalidAttribute(string $resource, string $detail): self
+    {
+        return new self("Invalid attribute for MikroTik {$resource}: {$detail}");
+    }
 }

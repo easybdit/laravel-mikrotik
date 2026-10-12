@@ -9,6 +9,7 @@ use Easybdit\LaravelMikrotik\Exceptions\AuthenticationException;
 use Easybdit\LaravelMikrotik\Exceptions\ConnectionException as MikrotikConnectionException;
 use Easybdit\LaravelMikrotik\Exceptions\MalformedResponseException;
 use Easybdit\LaravelMikrotik\Exceptions\RouterOsException;
+use Easybdit\LaravelMikrotik\Support\SecretRedactor;
 use Illuminate\Http\Client\ConnectionException as HttpConnectionException;
 use Illuminate\Http\Client\Pool;
 use Illuminate\Http\Client\RequestException as HttpRequestException;
@@ -308,6 +309,13 @@ class RestTransport implements Transport
 
         if ($response->failed()) {
             $body = $this->decodeOrNull($response->body());
+
+            // Defense in depth: RouterOS does not echo credentials in
+            // errors, but this connection's own password is scrubbed from
+            // any message/detail text regardless.
+            if (is_array($body)) {
+                $body = SecretRedactor::scrubValue($body, $this->password);
+            }
 
             if (is_array($body) && array_key_exists('message', $body)) {
                 throw RouterOsException::fromErrorBody($this->hostLabel(), $response->status(), $body);

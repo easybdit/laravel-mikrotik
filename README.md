@@ -7,14 +7,12 @@ change its configuration, plus optional database-backed monitoring
 (snapshots, threshold alerts, incidents, notifications) built on top of
 the same reads.
 
-**Current release: P1 through P21, plus P23-P25.** Everything
-documented below is implemented, tested, and — where marked — verified
-against a real RouterOS device. Nothing in this README describes a
-feature that does not exist yet; planned future work is listed
-separately in [Roadmap](#19-roadmap) and marked **Planned**, never as
-available today. (P22 — user/scheduler management — was intentionally
-skipped in favor of P23-P25's query/performance/release-hardening work
-and remains **Planned**; see [Roadmap](#19-roadmap).)
+**Current state: P1 through P25.** Everything documented below is
+implemented and tested with HTTP fakes; where a feature is marked
+"real-device verified" that is a recorded claim from the project's
+[CHANGELOG](CHANGELOG.md) (the repository stores no device logs), and
+anything marked *not device-tested* has only ever run against HTTP fakes.
+Planned future work is listed separately in [Roadmap](#19-roadmap).
 
 ## 1. What this package is
 
@@ -83,7 +81,7 @@ above (nothing here talks to RouterOS on its own beyond what `resource()`/
   write request under any circumstance. Write access only exists through
   explicit, typed resource classes like the ones above.
 - No other RouterOS configuration menu is implemented yet — no VPN,
-  wireless, bridge, VLAN, user/scheduler, etc. See
+  wireless, bridge, VLAN, etc. See
   [Feature matrix](#18-feature-matrix) for the authoritative list of what
   exists today, and [Roadmap](#19-roadmap) for what's planned.
 
@@ -94,20 +92,18 @@ above (nothing here talks to RouterOS on its own beyond what `resource()`/
   This package is **HTTPS-only by design** — RouterOS's plain-HTTP REST
   variant sends credentials as unencrypted HTTP Basic Auth, and there is
   no configuration option to use it.
-- One of these PHP/Laravel combinations (from `composer.json`, and each
-  individually verified installable, not just declared — see CI at
-  `.github/workflows/tests.yml`):
+- One of these PHP/Laravel combinations (from `composer.json`; CI at
+  `.github/workflows/tests.yml` tests exactly these pairs):
 
   | Laravel | PHP |
   |---|---|
-  | 10 | 8.1, 8.2, 8.3, 8.4 |
-  | 11 | 8.2, 8.3, 8.4 |
   | 12 | 8.2, 8.3, 8.4 |
   | 13 | 8.3, 8.4 |
 
-  A combination not listed (e.g. PHP 8.1 with Laravel 11+) is not
-  supported — Composer cannot resolve it, since Laravel itself raised its
-  minimum PHP version partway through that range.
+  **Laravel 10 and 11 are not supported.** Composer's security-advisory
+  check refuses every released Laravel 10.x and 11.x version (CI could
+  not resolve them), and this package does not disable that check. PHP
+  8.1 is dropped with them (Laravel 12 needs PHP 8.2+).
 - No PHP extensions beyond what Laravel's own HTTP client (Guzzle)
   already requires for your Laravel version — this package adds none of
   its own.
@@ -346,6 +342,14 @@ $item = $router->menu('interface')->find('ether1');
   absolute URL, or protocol-like input (`http://...`) throws
   `InvalidMenuPathException` immediately, without reaching the router.
 
+> **Credential redaction (P25):** rows returned by `menu()->get()`,
+> `find()` and `query()` have well-known credential fields removed by
+> default (`password`, `secret`, `ipsec-secret`, `psk`, `preshared-key`,
+> `wpa-pre-shared-key`, `wpa2-pre-shared-key`, `private-key`,
+> `passphrase`, `authentication-password`, `encryption-password`).
+> This is name-based and best effort. `menu('ppp/secret')->withSecrets()`
+> restores the old raw behaviour for that instance.
+
 ### Advanced query/filtering (P23)
 
 `get()`'s simple `?field=value` filtering can only express "AND" —
@@ -365,15 +369,19 @@ $router->menu('ip/address')->query(['dynamic=true'], proplist: ['.id', 'address'
 $router->menu('interface')->query(proplist: ['name', 'type']);
 ```
 
-- `$words` is RouterOS's own `.query` "query stack", sent verbatim: a
-  list of `"field=value"` conditions and, where you need it, a stack
-  operator RouterOS itself documents. **Only `"#|"` (OR) is confirmed**
-  — directly against a real device, across two different menus. This
-  package does not invent or validate RouterOS's own query-stack syntax
-  beyond what is confirmed; comparison operators (`>`, `<`), `NOT`, and
-  `~` (contains/regex) are **not** confirmed and are passed through
-  unvalidated at your own risk — an unsupported word surfaces as
-  `RouterOsException`.
+- `$words` is RouterOS's own `.query` "query stack". Every word is
+  validated before anything is sent. Accepted: `field=value` equality
+  and the stack operators `"#|"` (OR) and `"#|!"` (OR then NOT).
+  `"#|"` was confirmed against a real device (two menus); `"#|!"` is the
+  form in MikroTik's own REST documentation example and is covered by
+  HTTP-fake tests only. **Not accepted** (throws `InvalidQueryException`
+  without contacting the router): `#&`, `#!`, `>`/`<` comparisons, `~`,
+  name-existence words and anything else — they are not documented for
+  REST, so this package refuses to guess them.
+- Credential fields (e.g. `password`, see [Security](#16-security)) can
+  neither be queried nor listed in `$proplist`, and are removed from
+  every row `menu()` returns, unless you call `->withSecrets()` (a new
+  `Menu` instance) deliberately.
 - `$proplist` limits which fields RouterOS returns. **Confirmed to work
   through `query()`'s `POST` form; confirmed *not* to work as a plain
   `GET` query-string parameter** — tested directly against a real
@@ -625,6 +633,16 @@ support it.
 
 ### 7h. IP Route management (P20)
 
+> **Default-route safeguard (P25):** `routes()->remove($id)` and
+> `->disable($id)` first read the route and throw
+> `UnsafeOperationException` if it is a default route (`0.0.0.0/0`).
+> Pass `allowDefaultRoute: true` to proceed deliberately. This costs one
+> extra read; the write itself is still sent once and never retried.
+> `update($id, ['disabled' => true])` and any `update()` that sets
+> `dst-address` are guarded the same way (`allowDefaultRoute: true` to
+> override); other updates, e.g. changing the gateway, are not.
+
+
 `$router->ip()->routes()` maps to RouterOS's `/ip/route` menu — full
 `list()`/`find()`/`add()`/`update()`/`remove()`/`enable()`/`disable()`:
 
@@ -691,6 +709,32 @@ confirmed (via `systemIdentity()`) but the specific `/ip/dns` behavior
 as your own responsibility to verify first, on a router you can afford
 to misconfigure.
 
+### 7j. Users + Scheduler (P22)
+
+```php
+$users = $router->users();            // /user
+$users->list();                        // Collection<DTO\RouterUser>
+$users->add(['name' => 'ops', 'password' => '...', 'group' => 'read']);
+$users->disable('*5');
+
+$sched = $router->scheduler();        // /system/scheduler
+$sched->add(['name' => 'nightly', 'interval' => '1d', 'on-event' => '...', 'disabled' => true]);
+$sched->enable('*3');
+```
+
+Both offer `list/find/add/update/remove/enable/disable`. `add()` on users
+requires `name` and a non-empty `password`; on scheduler, `name`.
+Credentials are never returned (no password property, stripped from
+`->raw`). **Not device-tested** — these resources have only run against
+HTTP fakes, because changing router accounts or schedules is not a
+harmless test. Cautions: `remove()`, `disable()` and any `update()` that
+disables or renames **the account this connection itself logs in as**
+throw `UnsafeOperationException` unless you pass `allowActiveUser: true`.
+Not guarded: removing the last full-access user, changing a user's
+`group`/`address` (either can still lock you out); a scheduler entry's `on-event` runs on the router
+with its owner's privileges (this package only stores that text and never
+runs an entry — create entries `disabled` first).
+
 ## 8. Monitoring
 
 Everything in this section is **opt-in** — an application that never
@@ -722,6 +766,15 @@ $snapshot->resource;    // array, same shape as RouterResource::toArray()
 $snapshot->health;      // array keyed by sensor name
 $snapshot->interfaces;  // array keyed by interface name
 ```
+
+**Multiple routers (P24):** `SnapshotRecorder::recordMany(?array $names)`
+(and `ConnectionManager::pollMany()`) poll the named connections — all
+configured ones if omitted — **one router at a time** (each router's own
+three reads are still concurrent). One router failing yields its
+exception in that router's slot and never stops the rest; results keep
+the order you passed. Cross-router parallelism and write batching are
+**deferred** (writes are never retried, so batching would need its own
+design). No benchmark for the multi-router path exists.
 
 **P24 performance note**: `record()` fetches `resource()`/`health()`/
 `interfaces()` **concurrently** (via `RouterConnection::pollAll()`),
@@ -1129,6 +1182,8 @@ Before relying on this package against a production router:
 | `InvalidConfigurationException` | A problem in *this package's own* configuration, not the router. | An unknown connection name, a connection missing `host`/`username`/`password`, or an unsupported `transport` value (only `'rest'` exists today). |
 | `InvalidRuleException` | A `MikrotikRule` you tried to save is malformed. | An `operator` outside `>`, `>=`, `<`, `<=`, `==`, `!=`, or a `metric` not starting with `resource.`, `health.`, or `interfaces.`. |
 | `InvalidMenuPathException` | A `menu()` path or item identifier failed this package's own safety validation, **before any request was sent**. | A path/identifier containing `..`, a full URL, or a character outside the safe allow-list. |
+| `InvalidQueryException` | A `menu()->query()` word or `.proplist` field was refused by this package (P23/P25), **before any request was sent**. | An operator other than `field=value`, `#|`, `#|!`; a credential field name; a malformed field. |
+| `UnsafeOperationException` | A write was refused by a safeguard (P25) — currently deleting/disabling a default route. | Pass `allowDefaultRoute: true` only if you really mean it. |
 | `InvalidResourceException` | A typed write call (`ip()->addresses()->add()`) is missing a field this package requires before it will even send a request. | Calling `add()` without `address`. |
 
 **A note on TLS errors** specifically: they surface as
@@ -1141,6 +1196,22 @@ No exception this package throws ever includes the configured username
 or password — see [Security](#16-security).
 
 ## 16. Security
+
+P25 additions: every typed write validates attribute names (plain
+property names; no `.id`/`.query`/`.proplist`-style control keys) and
+requires scalar values before sending; `menu()` strips well-known
+credential fields from results (opt-out: `withSecrets()`); `users()` and
+`ppp()->secrets()` never return passwords; default-route removal/disable
+needs `allowDefaultRoute: true` (also for `update()` that disables it or
+changes its `dst-address`); `users()` refuses to remove/disable/rename
+the account the connection uses unless `allowActiveUser: true`.
+Credential redaction is recursive and case-insensitive, applies to every
+typed DTO's `raw` as well as `menu()`, and RouterOS error text has this
+connection's own password scrubbed. Writes are never retried. TLS
+verification stays on by default. Not guarded: RouterOS-specific
+property *values*, removing the last full-access user, and changing a
+user's `group`/`address`. Redaction is name-based, so a credential
+stored under an unlisted field name is not stripped.
 
 - Credentials stay in your application's own `.env`/config — this
   package adds no database table or admin UI for them.
@@ -1256,7 +1327,7 @@ The pieces you'll actually interact with:
 | `interfaceRate()` — one-shot live rate | Done | Yes | — | `/interface/monitor-traffic ... once` |
 | `logs()` — router logs | Done | Yes | — | `/log`; simple equality filtering only |
 | `menu()` — generic menu access | Done (P9) | Yes | No (deliberate) | Any other RouterOS menu, raw untyped rows, read-only forever |
-| `menu()->query()` — advanced query/proplist | Done (P23) | Yes | No | `.query`/`.proplist` POST mechanism; only equality + `"#|"` (OR) confirmed; real-device verified across 2 menus |
+| `menu()->query()` — advanced query/proplist | Done (P23) | Yes | No | `.query`/`.proplist` POST mechanism; validated words: equality, `"#|"` (device-verified), `"#|!"` (docs example); everything else rejected |
 | `ip()->addresses()` — IP address mgmt | Done (P13) | Yes | Yes | `list/find/add/update/remove/enable/disable`; real-device verified |
 | `interface()` — interface mgmt | Done (P14) | Yes | Yes (no add/remove) | `list/find/update/enable/disable`; real-device verified |
 | `firewall()->filter()` — firewall filter mgmt | Done (P15) | Yes | Yes | Full CRUD + enable/disable; real-device verified |
@@ -1277,32 +1348,24 @@ The pieces you'll actually interact with:
 | Analytics (`MonitoringAnalytics`) | Done (P8/P10) | Local DB only | — | No RouterOS requests of its own |
 | Production hardening (CI, concurrency, security) | Done (P11) | — | — | See [Security](#16-security), [Concurrency](#concurrency) |
 | `RouterConnection::pollAll()` — concurrent reads | Done (P24) | Yes | — | `resource()+health()+interfaces()` via `Http::pool()`; ~2x faster, real-device measured |
-| Final security/API/release audit | Done (P25) | — | — | Full repo security sweep, API consistency review, final real-device sweep |
-| User / Scheduler management | **Planned** | No | No | P22 — deliberately not yet implemented; see [Roadmap](#19-roadmap) |
+| Final security/API/release audit | Done (P25) | — | — | Attribute validation on all writes, default-route guard, generic-menu credential redaction, LICENSE, Laravel 12/13 matrix |
+| `users()` / `scheduler()` — user and scheduler mgmt | Done (P22) | Yes | Yes | Full CRUD + enable/disable; passwords never returned; **not device-tested** |
+| `SnapshotRecorder::recordMany()` — multi-router polling | Done (P24) | Yes | Local DB | Sequential across routers, isolated failures; parallel/write batching deferred |
 | Binary RouterOS API (port 8728/8729) | **Not planned** | No | No | REST only |
 | Multi-tenant / SaaS features | **Not planned** | — | — | — |
 
 ## 19. Roadmap
 
-**P1–P21 are complete, and P23–P25 are complete** (see
-[CHANGELOG.md](CHANGELOG.md) for full, phase-by-phase history) —
-including firewall filter, DHCP, PPP/PPPoE secret, simple queue, IP
-pool, IP route, and DNS/system identity management (all real-device
-verified except `dns()->update()` — see
-[section 7i](#7i-dns--system-identity-p21)), advanced `menu()->query()`
-filtering, concurrent reads (`pollAll()`), and a final production
-security/API audit. This package is considered stable as of this
-release (see [License](#license) for the tag/version).
+**P1–P25 are implemented** (see [CHANGELOG.md](CHANGELOG.md)).
+Deferred, not planned for a fixed date:
 
-**P22 — User/Scheduler management was deliberately skipped** in this
-cycle in favor of P23-P25's query/performance/release-hardening work,
-and remains planned:
+- Parallel multi-router polling and write batching (P24).
+- Further `menu()->query()` operators, only once documented for REST or
+  confirmed on a device (P23).
+- Device verification of the P22 user/scheduler resources.
 
-- **Planned — P22: User / Scheduler management** (`/user`, `/system/scheduler`)
-
-Beyond P22, nothing further is currently planned. Any future addition
-will still be scoped against RouterOS's official REST documentation and
-a real device first, per this package's standing rule never to guess
+Any future addition is scoped against RouterOS's official REST
+documentation first, per this package's standing rule never to guess
 RouterOS behavior.
 
 ## Known limitations
@@ -1317,8 +1380,7 @@ This package intentionally does **not** include:
   (contains/regex) filtering, no pagination beyond RouterOS's own log
   buffer size
 - VPN modules beyond PPP/PPPoE secrets (no IPsec/WireGuard/OpenVPN/L2TP
-  management), wireless, bridge/VLAN, or user/scheduler management (see
-  [Roadmap](#19-roadmap))
+  management), wireless, or bridge/VLAN
 - A built-in schedule entry or locking for `mikrotik:monitor` — you
   register it (and `->withoutOverlapping()`) on Laravel's own scheduler
   yourself
@@ -1369,8 +1431,6 @@ This package intentionally does **not** include:
   on it from this one
 - Multi-tenant / SaaS functionality
 - Database-backed router credentials — `.env`/config file based only
-- User/scheduler management (P22) — deliberately not yet implemented;
-  see [Roadmap](#19-roadmap)
 
 ### RouterOS permissions
 

@@ -114,6 +114,8 @@ final class InterfaceResource
      */
     private function wireAttributes(array $attributes): array
     {
+        \Easybdit\LaravelMikrotik\Support\AttributeValidator::assertSafe($attributes, self::class);
+
         foreach ($attributes as $key => $value) {
             if (is_bool($value)) {
                 $attributes[$key] = $value ? 'true' : 'false';

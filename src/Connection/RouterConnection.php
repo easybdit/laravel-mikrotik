@@ -17,7 +17,9 @@ use Easybdit\LaravelMikrotik\Resources\InterfaceResource;
 use Easybdit\LaravelMikrotik\Resources\IpResource;
 use Easybdit\LaravelMikrotik\Resources\PppResource;
 use Easybdit\LaravelMikrotik\Resources\QueueResource;
+use Easybdit\LaravelMikrotik\Resources\SchedulerResource;
 use Easybdit\LaravelMikrotik\Resources\SystemIdentityResource;
+use Easybdit\LaravelMikrotik\Resources\UserResource;
 use Easybdit\LaravelMikrotik\Support\ResponseNormalizer;
 
 /**
@@ -32,6 +34,7 @@ final class RouterConnection
         private readonly string $name,
         private readonly Transport $transport,
         private readonly ResponseNormalizer $normalizer,
+        private readonly ?string $username = null,
     ) {
     }
 
@@ -233,5 +236,24 @@ final class RouterConnection
     public function systemIdentity(): SystemIdentityResource
     {
         return new SystemIdentityResource($this->transport, $this->normalizer);
+    }
+
+    /**
+     * Typed, read+write access to RouterOS's `/user` menu (P22); see
+     * Resources\UserResource. Credentials are never returned.
+     */
+    public function users(): UserResource
+    {
+        return new UserResource($this->transport, $this->normalizer, $this->username);
+    }
+
+    /**
+     * Typed, read+write access to RouterOS's `/system/scheduler` menu
+     * (P22); see Resources\SchedulerResource. Entries are stored, never
+     * executed, by this package.
+     */
+    public function scheduler(): SchedulerResource
+    {
+        return new SchedulerResource($this->transport, $this->normalizer);
     }
 }

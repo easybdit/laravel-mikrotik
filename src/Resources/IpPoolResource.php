@@ -8,6 +8,7 @@ use Easybdit\LaravelMikrotik\Contracts\Transport;
 use Easybdit\LaravelMikrotik\DTO\IpPool;
 use Easybdit\LaravelMikrotik\Exceptions\InvalidMenuPathException;
 use Easybdit\LaravelMikrotik\Exceptions\InvalidResourceException;
+use Easybdit\LaravelMikrotik\Support\AttributeValidator;
 use Easybdit\LaravelMikrotik\Support\ResponseNormalizer;
 use Illuminate\Support\Collection;
 
@@ -52,6 +53,8 @@ final class IpPoolResource
             throw InvalidResourceException::missingRequiredField('IP pool', 'name');
         }
 
+        AttributeValidator::assertSafe($attributes, self::class);
+
         return $this->normalizer->normalizeIpPool($this->transport->put(self::PATH, $attributes));
     }
 
@@ -59,6 +62,8 @@ final class IpPoolResource
     public function update(string $id, array $attributes): IpPool
     {
         $id = self::assertValidIdentifier($id);
+
+        AttributeValidator::assertSafe($attributes, self::class);
 
         return $this->normalizer->normalizeIpPool($this->transport->patch(self::PATH . '/' . $id, $attributes));
     }

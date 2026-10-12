@@ -2,6 +2,59 @@
 
 All notable changes to `easybdit/laravel-mikrotik` are documented here.
 
+## 2.0.0 — P22, P23/P24 follow-ups, P25 release readiness
+
+**Compatibility / breaking-ish changes (read before upgrading from 1.0.0; this is a major release):**
+
+- **Supported versions narrowed to Laravel 12/13, PHP 8.2+.** Composer
+  refuses every released Laravel 10.x and 11.x version because of
+  security advisories (CI's Testbench ^8/^9 cells failed to resolve),
+  so those versions could not be tested or safely supported. PHP 8.1 is
+  dropped with Laravel 10. `composer.json`, the CI matrix and the README
+  now agree. Composer audit blocking was not weakened. Previous CHANGELOG
+  claims that the older pairs were "verified installable" no longer hold.
+- `Menu::query()` now validates words: only `field=value`, `#|` and `#|!`
+  are accepted; anything else (`#&`, `#!`, `>`, `<`, `~`, bare words)
+  throws the new `InvalidQueryException` instead of being forwarded to
+  RouterOS. `.proplist` fields are validated too.
+- `Menu::get()/find()/query()` now remove well-known credential fields
+  (`Support\SecretRedactor::FIELDS`) from returned rows and refuse to
+  query/list them; `->withSecrets()` opts out.
+- Every typed write resource now rejects attribute names that are not
+  plain property names (including `.id`, `.query`) and non-scalar/null
+  values with `InvalidResourceException`.
+- `ip()->routes()->remove()`, `->disable()` and `->update()` take a new
+  optional `allowDefaultRoute` argument and refuse default routes
+  (`0.0.0.0/0`) by default when deleting, disabling, or changing
+  `dst-address` (new `UnsafeOperationException`), at the cost of one
+  extra read for those calls only.
+- `users()->remove()/disable()/update()` take `allowActiveUser` and
+  refuse to remove, disable or rename the account the connection logs in
+  as (`RouterConnection` now receives its username; the constructor
+  argument is optional, so existing direct constructions still work, but
+  the guard is then inactive).
+- `SecretRedactor` is recursive and case-insensitive and now also runs
+  on every typed DTO's `raw` (previously only `PppSecret`); RouterOS
+  error text has the connection's own password scrubbed; `ip()->pools()`
+  writes are now attribute-validated; string attribute values containing
+  control characters (other than tab/newline/CR) are rejected.
+
+**P22 — `users()` (`/user`) and `scheduler()` (`/system/scheduler`).**
+`list/find/add/update/remove/enable/disable`; `DTO\RouterUser` (no
+password, credential fields stripped from `raw`) and `DTO\SchedulerEntry`.
+`users()->add()` requires `name` and a non-empty `password`. HTTP-fake
+tests only — **not verified against a real device**.
+
+**P24 follow-up.** `ConnectionManager::pollMany()` and
+`SnapshotRecorder::recordMany()` poll several routers sequentially with
+per-router error isolation (`DTO\PollResult`), preserving order.
+Parallel multi-router polling, write batching and a benchmark are
+deferred; no performance figure is claimed for the multi-router path.
+
+**P25.** Added the MIT `LICENSE` file, Composer `authors`/`homepage`/
+`support`, CI `composer validate --strict`. 53 new tests (408 total, 904 assertions).
+No real-device testing was performed in this cycle.
+
 ## P23-P25 — Advanced query, concurrent reads, final production audit
 
 **P23 — advanced query/filtering (`menu()`).** Added `Menu::query(array

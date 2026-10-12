@@ -270,7 +270,7 @@ class MenuTest extends TestCase
 
         $this->expectException(RouterOsException::class);
 
-        Mikrotik::connection()->menu('interface')->query(['not-a-valid-word']);
+        Mikrotik::connection()->menu('interface')->query(['bogus=1']);
     }
 
     public function test_query_uses_the_same_read_retry_configuration_as_get(): void

@@ -94,7 +94,7 @@ class IpRouteResourceTest extends TestCase
         Http::fake(['router.test/rest/ip/route/*1' => Http::response(['.id' => '*1', 'disabled' => 'true'], 200)]);
 
         $this->assertTrue($this->routes()->disable('*1')->disabled);
-        Http::assertSent(fn ($r) => $r['disabled'] === 'true');
+        Http::assertSent(fn ($r) => $r->method() === 'PATCH' && $r['disabled'] === 'true');
     }
 
     public function test_update_never_retries(): void
